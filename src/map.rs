@@ -17,7 +17,7 @@ const SIZE: usize = 11;
 const CELL_WIDTH: u16 = 16;
 const CELL_HEIGHT: u16 = 4;
 /// Classic Monopoly board green (#CDE6D0).
-const BOARD_BG: Color = Color::Rgb(0xCD, 0xE6, 0xD0);
+pub const BOARD_BG: Color = Color::Rgb(0xCD, 0xE6, 0xD0);
 
 pub struct Map {
     board: Vec<Space>,
@@ -41,7 +41,7 @@ impl Widget for Map {
             .flex(Flex::Center)
             .areas(area);
 
-        // Paint the board background; cells draw on top, hollow center stays green.
+        // Green fills the board, including the hollow center; cells draw on top.
         Block::new().style(Style::new().bg(BOARD_BG)).render(area, buf);
 
         // `areas::<N>` returns a stack array, no per-frame heap allocation.
@@ -82,7 +82,7 @@ fn ring_index(r: usize, c: usize, rows: usize, cols: usize) -> Option<usize> {
 /// color group for properties.
 fn render_space(space: &Space, area: Rect, buf: &mut Buffer) {
     let mut block = Block::bordered()
-        .style(Style::new().bg(Color::Black).bold())
+        .style(Style::new().bg(BOARD_BG).fg(Color::Black).bold())
         .title_top(Line::from(short_name(space)).centered());
 
     let detail = detail_line(space);

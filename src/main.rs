@@ -61,7 +61,7 @@ fn run(terminal: &mut DefaultTerminal) -> Result<()> {
 }
 
 fn render(frame: &mut Frame, app: &App) {
-    frame.render_widget(Map::default(), frame.area()); // board behind everything
+    frame.render_widget(Map::default(), frame.area()); // board centers itself
     if let App::Setup(setup) = app {
         setup.render(frame);
     }

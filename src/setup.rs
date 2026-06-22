@@ -7,7 +7,7 @@ use crossterm::event::KeyCode;
 use ratatui::{
     Frame,
     layout::{Constraint, Flex, Layout, Rect},
-    style::Stylize,
+    style::{Color, Style, Stylize},
     text::Line,
     widgets::{Block, Clear, Paragraph},
 };
@@ -114,7 +114,9 @@ impl Setup {
         let height = self.field_count() as u16 + 4; // fields + border + hint
         let area = popup_area(frame.area(), POPUP_WIDTH, height);
 
-        let block = Block::bordered().title(" New Game ");
+        let block = Block::bordered()
+            .title(" New Game ")
+            .style(Style::new().bg(Color::Black));
         let inner = block.inner(area);
 
         frame.render_widget(Clear, area); // wipe the board behind the popup
