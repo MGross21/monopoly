@@ -1,43 +1,104 @@
+//! Draws the board: an 11x11 grid where only the outer ring holds spaces.
+
 use ratatui::{
     buffer::Buffer,
     layout::{Constraint, Layout, Rect},
+    style::Style,
     widgets::{Block, Widget},
 };
 
+use crate::board::board;
+use crate::space::Space;
+
+/// 11x11 grid; only the outer ring holds the 40 spaces.
+const SIZE: usize = 11;
+/// Cell size in terminal cells. Width must fit the longest name + 2 borders.
+const CELL_WIDTH: u16 = 16;
+const CELL_HEIGHT: u16 = 4;
+
 pub struct Map {
-    rows: usize,
-    cols: usize,
+    board: Vec<Space>,
 }
 
 impl Map {
     pub fn default() -> Self {
-        // Default to Monopoly board size (11x11)
-        Self {
-            rows: 11,
-            cols: 11,
-        }
+        Self { board: board() }
     }
 }
 
 impl Widget for Map {
     fn render(self, area: Rect, buf: &mut Buffer) {
-        let col_constraints = (0..self.cols).map(|_| Constraint::Length(8));
-        let row_constraints = (0..self.rows).map(|_| Constraint::Length(4));
-        let horizontal = Layout::horizontal(col_constraints);
-        let vertical = Layout::vertical(row_constraints);
+        // `areas::<N>` returns a stack array, no per-frame heap allocation.
+        let vertical = Layout::vertical([Constraint::Length(CELL_HEIGHT); SIZE]);
+        let horizontal = Layout::horizontal([Constraint::Length(CELL_WIDTH); SIZE]);
 
-        let mut n = 0;
-        for (r, row) in area.layout_vec(&vertical).into_iter().enumerate() {
-            for (c, cell) in row.layout_vec(&horizontal).into_iter().enumerate() {
-                let is_ring = r == 0 || r == self.rows - 1 || c == 0 || c == self.cols - 1;
-                if !is_ring {
-                    continue;
-                }
-                n += 1;
-                Block::bordered()
-                    .title(format!("{:02}", n))
-                    .render(cell, buf);
+        for (r, row) in vertical.areas::<SIZE>(area).into_iter().enumerate() {
+            for (c, cell) in horizontal.areas::<SIZE>(row).into_iter().enumerate() {
+                let Some(index) = ring_index(r, c, SIZE, SIZE) else {
+                    continue; // interior cell
+                };
+                render_space(&self.board[index], cell, buf);
             }
         }
+    }
+}
+
+/// Ring cell (row, col) -> board index 0..40, clockwise from GO at the
+/// bottom-right corner. Interior cells return `None`.
+fn ring_index(r: usize, c: usize, rows: usize, cols: usize) -> Option<usize> {
+    let last_r = rows - 1;
+    let last_c = cols - 1;
+
+    if r == last_r {
+        Some(last_c - c) // bottom row: GO (0) -> Jail (10)
+    } else if c == 0 {
+        Some(last_c + (last_r - r)) // left column: 11 -> Free Parking (20)
+    } else if r == 0 {
+        Some(last_c + last_r + c) // top row: 21 -> Go To Jail (30)
+    } else if c == last_c {
+        Some(last_c + last_r + last_c + r) // right column: 31 -> Boardwalk (39)
+    } else {
+        None
+    }
+}
+
+/// Bordered cell: name on top, price/owner on the bottom, border tinted by
+/// color group for properties.
+fn render_space(space: &Space, area: Rect, buf: &mut Buffer) {
+    let mut block = Block::bordered().title_top(short_name(space));
+
+    let detail = detail_line(space);
+    if !detail.is_empty() {
+        block = block.title_bottom(detail);
+    }
+    if let Space::Property(p) = space {
+        block = block.border_style(Style::new().fg(p.group.color()));
+    }
+
+    block.render(area, buf);
+}
+
+/// Name trimmed to the inner width (cell width minus the two borders).
+fn short_name(space: &Space) -> String {
+    let max = (CELL_WIDTH - 2) as usize;
+    space.name().chars().take(max).collect()
+}
+
+/// Owner if bought, else price, else blank.
+fn detail_line(space: &Space) -> String {
+    match space {
+        Space::Property(p) => owned_or_price(p.owner, p.price),
+        Space::Railroad(r) => owned_or_price(r.owner, r.price),
+        Space::Utility(u) => owned_or_price(u.owner, u.price),
+        Space::Tax(amount) => format!("-${amount}"),
+        _ => String::new(),
+    }
+}
+
+/// "P1" if owned, otherwise the price like "$200".
+fn owned_or_price(owner: Option<usize>, price: u32) -> String {
+    match owner {
+        Some(player) => format!("P{}", player + 1),
+        None => format!("${price}"),
     }
 }

@@ -1,0 +1,95 @@
+//! Board space data types, no rendering here.
+//!
+//! `allow(dead_code)` covers fields not yet read (e.g. `rent`) until game logic
+//! lands.
+#![allow(dead_code)]
+
+use ratatui::style::Color;
+
+/// The eight color groups for street properties.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ColorGroup {
+    Brown,
+    LightBlue,
+    Pink,
+    Orange,
+    Red,
+    Yellow,
+    Green,
+    DarkBlue,
+}
+
+impl ColorGroup {
+    /// Border/banner color used when drawing a property.
+    pub fn color(self) -> Color {
+        match self {
+            ColorGroup::Brown => Color::Rgb(149, 84, 54),
+            ColorGroup::LightBlue => Color::Rgb(170, 224, 250),
+            ColorGroup::Pink => Color::Rgb(217, 58, 150),
+            ColorGroup::Orange => Color::Rgb(247, 148, 29),
+            ColorGroup::Red => Color::Rgb(237, 27, 36),
+            ColorGroup::Yellow => Color::Rgb(254, 242, 0),
+            ColorGroup::Green => Color::Rgb(31, 158, 75),
+            ColorGroup::DarkBlue => Color::Rgb(0, 114, 187),
+        }
+    }
+}
+
+/// A street you can buy, build on, and charge rent for.
+#[derive(Debug, Clone)]
+pub struct Property {
+    pub name: String,
+    pub group: ColorGroup,
+    pub price: u32,
+    pub rent: u32, // base rent, no houses
+    pub owner: Option<usize>, // None = bank, Some(i) = player i
+}
+
+/// One of the four railroads.
+#[derive(Debug, Clone)]
+pub struct Railroad {
+    pub name: String,
+    pub price: u32,
+    pub owner: Option<usize>,
+}
+
+/// Electric Company or Water Works.
+#[derive(Debug, Clone)]
+pub struct Utility {
+    pub name: String,
+    pub price: u32,
+    pub owner: Option<usize>,
+}
+
+/// Every square is exactly one of these; each variant carries only its own data.
+#[derive(Debug, Clone)]
+pub enum Space {
+    Go,
+    Property(Property),
+    Railroad(Railroad),
+    Utility(Utility),
+    Tax(u32), // amount owed
+    Chance,
+    CommunityChest,
+    Jail, // also "just visiting"
+    FreeParking,
+    GoToJail,
+}
+
+impl Space {
+    /// Short label for the board cell.
+    pub fn name(&self) -> &str {
+        match self {
+            Space::Go => "GO",
+            Space::Property(p) => &p.name,
+            Space::Railroad(r) => &r.name,
+            Space::Utility(u) => &u.name,
+            Space::Tax(_) => "Tax",
+            Space::Chance => "Chance",
+            Space::CommunityChest => "Comm Chest",
+            Space::Jail => "Jail",
+            Space::FreeParking => "Free Parking",
+            Space::GoToJail => "Go To Jail",
+        }
+    }
+}

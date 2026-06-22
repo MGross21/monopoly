@@ -5,7 +5,10 @@ use ratatui::DefaultTerminal;
 use ratatui::backend::CrosstermBackend;
 use std::io::stdout;
 
+mod board;
 mod map;
+mod space;
+
 use crate::map::Map;
 
 fn run(terminal: &mut ratatui::DefaultTerminal) -> Result<()> {
