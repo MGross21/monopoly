@@ -7,18 +7,24 @@ use ratatui::style::Style;
 use ratatui::widgets::Block;
 use ratatui::{DefaultTerminal, Frame};
 use std::io::stdout;
+use std::time::Duration;
 
 mod board;
+mod dice;
 mod map;
 mod menu;
 mod player;
 mod setup;
 mod space;
 
+use crate::dice::{Animation, Roll};
 use crate::map::{BOARD_BG, BOARD_H, BOARD_W, Map, Overlay, render_warning};
 use crate::menu::{Menu, MenuAction};
 use crate::player::Player;
 use crate::setup::Setup;
+
+/// Time each GIF frame is shown during a roll.
+const FRAME_TIME: Duration = Duration::from_millis(40);
 
 /// Top-level screen.
 enum App {
@@ -30,11 +36,38 @@ enum App {
 /// An in-progress game.
 struct Game {
     players: Vec<Player>,
+    anim: Animation,
+    roll: Option<Roll>,
 }
 
 impl Game {
     fn new(players: Vec<Player>) -> Self {
-        Self { players }
+        Self {
+            players,
+            anim: Animation::load(),
+            roll: None,
+        }
+    }
+
+    /// True while a roll's GIF is still playing.
+    fn animating(&self) -> bool {
+        self.roll.as_ref().is_some_and(Roll::animating)
+    }
+
+    /// Advance the current roll's animation by one frame.
+    fn tick(&mut self) {
+        if let Some(roll) = &mut self.roll {
+            roll.tick(&self.anim);
+        }
+    }
+
+    /// Space starts a roll, or dismisses a finished one.
+    fn on_space(&mut self) {
+        match &self.roll {
+            None => self.roll = Some(Roll::new()),
+            Some(roll) if !roll.animating() => self.roll = None,
+            Some(_) => {} // mid-animation, ignore
+        }
     }
 }
 
@@ -67,6 +100,16 @@ fn run(terminal: &mut DefaultTerminal) -> Result<()> {
     loop {
         terminal.draw(|frame| render(frame, &app))?;
 
+        // While a roll is animating, wake on a timer to advance frames; when
+        // idle, block until the next key so we don't spin.
+        let animating = matches!(&app, App::Playing(g) if g.animating());
+        if animating && !event::poll(FRAME_TIME)? {
+            if let App::Playing(g) = &mut app {
+                g.tick();
+            }
+            continue;
+        }
+
         let Event::Key(key) = event::read()? else {
             continue;
         };
@@ -92,7 +135,12 @@ fn run(terminal: &mut DefaultTerminal) -> Result<()> {
                     Transition::Stay
                 }
             }
-            App::Playing(_) => Transition::Stay,
+            App::Playing(g) => {
+                if key.code == KeyCode::Char(' ') {
+                    g.on_space();
+                }
+                Transition::Stay
+            }
         };
 
         match transition {
@@ -123,7 +171,13 @@ fn render(frame: &mut Frame, app: &App) {
     };
     frame.render_widget(map, area);
 
-    if let App::Setup(setup) = app {
-        setup.render(frame);
+    match app {
+        App::Setup(setup) => setup.render(frame),
+        App::Playing(g) => {
+            if let Some(roll) = &g.roll {
+                dice::render(frame, &g.anim, roll);
+            }
+        }
+        App::Menu(_) => {}
     }
 }
