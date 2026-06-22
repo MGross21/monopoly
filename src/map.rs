@@ -5,7 +5,7 @@ use ratatui::{
     layout::{Constraint, Flex, Layout, Rect},
     style::{Color, Style},
     text::Line,
-    widgets::{Block, Widget},
+    widgets::{Block, Paragraph, Widget},
 };
 
 use crate::board::board;
@@ -93,12 +93,22 @@ fn render_space(space: &Space, area: Rect, buf: &mut Buffer) {
     let inner = block.inner(area);
     block.render(area, buf);
 
-    // Color band along the top inner row, like the strip on a property card.
-    if let Space::Property(p) = space {
-        let band = Rect::new(inner.x, inner.y, inner.width, 1);
-        Block::new()
-            .style(Style::new().bg(p.group.color()))
-            .render(band, buf);
+    // Top inner row is a banner: the color group for properties, otherwise a
+    // black strip with a white icon for chance/chest/railroad/tax.
+    let banner = Rect::new(inner.x, inner.y, inner.width, 1);
+    match space {
+        Space::Property(p) => {
+            Block::new()
+                .style(Style::new().bg(p.group.color()))
+                .render(banner, buf);
+        }
+        _ => {
+            if let Some(icon) = space.icon() {
+                Paragraph::new(Line::from(icon).centered())
+                    .style(Style::new().fg(Color::White).bg(Color::Black).bold())
+                    .render(banner, buf);
+            }
+        }
     }
 }
 

@@ -92,4 +92,18 @@ impl Space {
             Space::GoToJail => "Go To Jail",
         }
     }
+
+    /// Banner icon for non-property spaces. `None` = show the name only.
+    ///
+    /// Nerd Font glyphs (monochrome, honor `fg`/bold) — needs a Nerd Font in the
+    /// terminal. Codepoints: `nf-fa-archive` (chest), `nf-fa-train` (railroad).
+    pub fn icon(&self) -> Option<&'static str> {
+        match self {
+            Space::Chance => Some("?"),
+            Space::CommunityChest => Some("\u{f187}"),
+            Space::Railroad(_) => Some("\u{f238}"),
+            Space::Tax(_) => Some("$"),
+            _ => None,
+        }
+    }
 }
