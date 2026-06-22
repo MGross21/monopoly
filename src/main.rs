@@ -3,8 +3,6 @@ use crossterm::cursor::MoveTo;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use crossterm::execute;
 use crossterm::terminal::{Clear, ClearType};
-use ratatui::layout::Alignment;
-use ratatui::widgets::{Paragraph, Wrap};
 use ratatui::{DefaultTerminal, Frame};
 use std::io::stdout;
 
@@ -14,7 +12,7 @@ mod player;
 mod setup;
 mod space;
 
-use crate::map::{BOARD_H, BOARD_W, Map};
+use crate::map::{BOARD_H, BOARD_W, Map, render_warning};
 use crate::player::Player;
 use crate::setup::Setup;
 
@@ -65,14 +63,7 @@ fn run(terminal: &mut DefaultTerminal) -> Result<()> {
 fn render(frame: &mut Frame, app: &App) {
     let area = frame.area();
     if area.width < BOARD_W || area.height < BOARD_H {
-        let msg = format!(
-            "Terminal too small.\nNeed at least {BOARD_W}x{BOARD_H}, have {}x{}.\nResize, or press q to quit.",
-            area.width, area.height
-        );
-        let warning = Paragraph::new(msg)
-            .alignment(Alignment::Center)
-            .wrap(Wrap { trim: true });
-        frame.render_widget(warning, area);
+        render_warning(area, frame.buffer_mut());
         return;
     }
 
