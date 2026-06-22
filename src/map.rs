@@ -2,8 +2,9 @@
 
 use ratatui::{
     buffer::Buffer,
-    layout::{Constraint, Layout, Rect},
-    style::Style,
+    layout::{Constraint, Flex, Layout, Rect},
+    style::{Color, Style},
+    text::Line,
     widgets::{Block, Widget},
 };
 
@@ -15,6 +16,8 @@ const SIZE: usize = 11;
 /// Cell size in terminal cells. Width must fit the longest name + 2 borders.
 const CELL_WIDTH: u16 = 16;
 const CELL_HEIGHT: u16 = 4;
+/// Classic Monopoly board green (#CDE6D0).
+const BOARD_BG: Color = Color::Rgb(0xCD, 0xE6, 0xD0);
 
 pub struct Map {
     board: Vec<Space>,
@@ -28,6 +31,19 @@ impl Map {
 
 impl Widget for Map {
     fn render(self, area: Rect, buf: &mut Buffer) {
+        // Center the fixed-size board within whatever area we're given.
+        let board_w = SIZE as u16 * CELL_WIDTH;
+        let board_h = SIZE as u16 * CELL_HEIGHT;
+        let [area] = Layout::horizontal([Constraint::Length(board_w)])
+            .flex(Flex::Center)
+            .areas(area);
+        let [area] = Layout::vertical([Constraint::Length(board_h)])
+            .flex(Flex::Center)
+            .areas(area);
+
+        // Paint the board background; cells draw on top, hollow center stays green.
+        Block::new().style(Style::new().bg(BOARD_BG)).render(area, buf);
+
         // `areas::<N>` returns a stack array, no per-frame heap allocation.
         let vertical = Layout::vertical([Constraint::Length(CELL_HEIGHT); SIZE]);
         let horizontal = Layout::horizontal([Constraint::Length(CELL_WIDTH); SIZE]);
@@ -65,17 +81,25 @@ fn ring_index(r: usize, c: usize, rows: usize, cols: usize) -> Option<usize> {
 /// Bordered cell: name on top, price/owner on the bottom, border tinted by
 /// color group for properties.
 fn render_space(space: &Space, area: Rect, buf: &mut Buffer) {
-    let mut block = Block::bordered().title_top(short_name(space));
+    let mut block = Block::bordered()
+        .style(Style::new().bg(Color::Black).bold())
+        .title_top(Line::from(short_name(space)).centered());
 
     let detail = detail_line(space);
     if !detail.is_empty() {
-        block = block.title_bottom(detail);
-    }
-    if let Space::Property(p) = space {
-        block = block.border_style(Style::new().fg(p.group.color()));
+        block = block.title_bottom(Line::from(detail).centered());
     }
 
+    let inner = block.inner(area);
     block.render(area, buf);
+
+    // Color band along the top inner row, like the strip on a property card.
+    if let Space::Property(p) = space {
+        let band = Rect::new(inner.x, inner.y, inner.width, 1);
+        Block::new()
+            .style(Style::new().bg(p.group.color()))
+            .render(band, buf);
+    }
 }
 
 /// Name trimmed to the inner width (cell width minus the two borders).
