@@ -8,6 +8,8 @@ use ratatui::{
     widgets::{Block, Paragraph, Widget},
 };
 
+use tui_big_text::{BigText, PixelSize};
+
 use crate::board::board;
 use crate::space::Space;
 
@@ -16,8 +18,14 @@ const SIZE: usize = 11;
 /// Cell size in terminal cells. Width must fit the longest name + 2 borders.
 const CELL_WIDTH: u16 = 16;
 const CELL_HEIGHT: u16 = 4;
+/// Full board size; the terminal must be at least this big to render.
+pub const BOARD_W: u16 = SIZE as u16 * CELL_WIDTH;
+pub const BOARD_H: u16 = SIZE as u16 * CELL_HEIGHT;
 /// Classic Monopoly board green (#CDE6D0).
 pub const BOARD_BG: Color = Color::Rgb(0xCD, 0xE6, 0xD0);
+const TITLE_RED: Color = Color::Rgb(0xED, 0x1B, 0x24);
+const CHANCE_ORANGE: Color = Color::Rgb(0xF7, 0x94, 0x1D);
+const CHEST_GOLD: Color = Color::Rgb(0xC8, 0x96, 0x28);
 
 pub struct Map {
     board: Vec<Space>,
@@ -31,13 +39,12 @@ impl Map {
 
 impl Widget for Map {
     fn render(self, area: Rect, buf: &mut Buffer) {
-        // Center the fixed-size board within whatever area we're given.
-        let board_w = SIZE as u16 * CELL_WIDTH;
-        let board_h = SIZE as u16 * CELL_HEIGHT;
-        let [area] = Layout::horizontal([Constraint::Length(board_w)])
+        // Center the fixed-size board within whatever area we're given. The
+        // caller guarantees the area is at least BOARD_W x BOARD_H.
+        let [area] = Layout::horizontal([Constraint::Length(BOARD_W)])
             .flex(Flex::Center)
             .areas(area);
-        let [area] = Layout::vertical([Constraint::Length(board_h)])
+        let [area] = Layout::vertical([Constraint::Length(BOARD_H)])
             .flex(Flex::Center)
             .areas(area);
 
@@ -56,7 +63,75 @@ impl Widget for Map {
                 render_space(&self.board[index], cell, buf);
             }
         }
+
+        // Hollow center: inset the board by one cell on every side.
+        let center = Rect::new(
+            area.x + CELL_WIDTH,
+            area.y + CELL_HEIGHT,
+            BOARD_W - 2 * CELL_WIDTH,
+            BOARD_H - 2 * CELL_HEIGHT,
+        );
+        render_center(center, buf);
     }
+}
+
+/// Draws the board interior: Community Chest slot, big MONOPOLY title, Chance slot.
+fn render_center(area: Rect, buf: &mut Buffer) {
+    let [top, middle, bottom] = Layout::vertical([
+        Constraint::Percentage(34),
+        Constraint::Percentage(32),
+        Constraint::Percentage(34),
+    ])
+    .areas(area);
+
+    render_card_slot(top, "COMMUNITY CHEST", "\u{f187}", CHEST_GOLD, buf);
+    render_title(middle, buf);
+    render_card_slot(bottom, "CHANCE", "?", CHANCE_ORANGE, buf);
+}
+
+/// Big block-glyph "MONOPOLY", centered in `area`.
+fn render_title(area: Rect, buf: &mut Buffer) {
+    let title = BigText::builder()
+        .pixel_size(PixelSize::Full)
+        .centered()
+        .lines(vec!["MONOPOLY".into()])
+        .style(Style::new().fg(TITLE_RED).bold())
+        .build();
+
+    // A glyph is 8 rows tall; center that band vertically.
+    let [band] = Layout::vertical([Constraint::Length(8)])
+        .flex(Flex::Center)
+        .areas(area);
+    title.render(band, buf);
+}
+
+/// A bordered card pile with a centered label and icon.
+fn render_card_slot(area: Rect, label: &str, icon: &str, color: Color, buf: &mut Buffer) {
+    let area = centered(area, 40, 7);
+    let block = Block::bordered()
+        .title_top(Line::from(label).centered())
+        .style(Style::new().fg(color).bold());
+
+    let inner = block.inner(area);
+    block.render(area, buf);
+
+    let [icon_row] = Layout::vertical([Constraint::Length(1)])
+        .flex(Flex::Center)
+        .areas(inner);
+    Paragraph::new(Line::from(icon).centered())
+        .style(Style::new().fg(color).bold())
+        .render(icon_row, buf);
+}
+
+/// Centers a `width` x `height` rect inside `area`.
+fn centered(area: Rect, width: u16, height: u16) -> Rect {
+    let [area] = Layout::horizontal([Constraint::Length(width)])
+        .flex(Flex::Center)
+        .areas(area);
+    let [area] = Layout::vertical([Constraint::Length(height)])
+        .flex(Flex::Center)
+        .areas(area);
+    area
 }
 
 /// Ring cell (row, col) -> board index 0..40, clockwise from GO at the
