@@ -1,7 +1,7 @@
 use ratatui::{
     buffer::Buffer,
     layout::{Constraint, Layout, Rect},
-    widgets::{Block, Paragraph, Widget},
+    widgets::{Block, Widget},
 };
 
 pub struct Map {
@@ -21,17 +21,23 @@ impl Map {
 
 impl Widget for Map {
     fn render(self, area: Rect, buf: &mut Buffer) {
-        let col_constraints = (0..self.cols).map(|_| Constraint::Length(9));
-        let row_constraints = (0..self.rows).map(|_| Constraint::Length(3));
-        let horizontal = Layout::horizontal(col_constraints).spacing(1);
-        let vertical = Layout::vertical(row_constraints).spacing(1);
+        let col_constraints = (0..self.cols).map(|_| Constraint::Length(8));
+        let row_constraints = (0..self.rows).map(|_| Constraint::Length(4));
+        let horizontal = Layout::horizontal(col_constraints);
+        let vertical = Layout::vertical(row_constraints);
 
-        let cells = area.layout_vec(&vertical).into_iter().flat_map(|row| row.layout_vec(&horizontal));
-
-        for (i, cell) in cells.enumerate() {
-            Paragraph::new(format!("Area {:02}", i + 1))
-                .block(Block::bordered())
-                .render(cell, buf);
+        let mut n = 0;
+        for (r, row) in area.layout_vec(&vertical).into_iter().enumerate() {
+            for (c, cell) in row.layout_vec(&horizontal).into_iter().enumerate() {
+                let is_ring = r == 0 || r == self.rows - 1 || c == 0 || c == self.cols - 1;
+                if !is_ring {
+                    continue;
+                }
+                n += 1;
+                Block::bordered()
+                    .title(format!("{:02}", n))
+                    .render(cell, buf);
+            }
         }
     }
 }
