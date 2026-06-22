@@ -3,7 +3,7 @@
 use ratatui::{
     buffer::Buffer,
     layout::{Alignment, Constraint, Flex, Layout, Rect},
-    style::{Color, Style},
+    style::{Color, Style, Stylize},
     text::Line,
     widgets::{Block, Paragraph, Widget, Wrap},
 };
@@ -11,7 +11,15 @@ use ratatui::{
 use tui_big_text::{BigText, PixelSize};
 
 use crate::board::board;
+use crate::menu::OPTIONS;
+use crate::player::Player;
 use crate::space::Space;
+
+/// What to draw in the hollow center: the main menu, or the card slots.
+pub enum Overlay {
+    Menu { selected: usize },
+    Board,
+}
 
 /// 11x11 grid; only the outer ring holds the 40 spaces.
 const SIZE: usize = 11;
@@ -30,11 +38,17 @@ const CHEST_GOLD: Color = Color::Rgb(0xC8, 0x96, 0x28);
 
 pub struct Map {
     board: Vec<Space>,
+    players: Vec<Player>,
+    overlay: Overlay,
 }
 
 impl Map {
-    pub fn default() -> Self {
-        Self { board: board() }
+    pub fn new(players: Vec<Player>, overlay: Overlay) -> Self {
+        Self {
+            board: board(),
+            players,
+            overlay,
+        }
     }
 }
 
@@ -68,6 +82,7 @@ impl Widget for Map {
                     continue; // interior cell
                 };
                 render_space(&self.board[index], cell, buf);
+                self.render_tokens(index, cell, buf);
             }
         }
 
@@ -78,12 +93,39 @@ impl Widget for Map {
             board_w - 2 * cell_w,
             board_h - 2 * cell_h,
         );
-        render_center(center, buf);
+        render_center(center, &self.overlay, buf);
     }
 }
 
-/// Draws the board interior: Community Chest slot, big MONOPOLY title, Chance slot.
-fn render_center(area: Rect, buf: &mut Buffer) {
+impl Map {
+    /// Draws the tokens of any players standing on `index` along the cell's
+    /// bottom inner row.
+    fn render_tokens(&self, index: usize, cell: Rect, buf: &mut Buffer) {
+        let icons = self
+            .players
+            .iter()
+            .filter(|p| p.position == index)
+            .map(|p| p.piece.icon())
+            .collect::<Vec<_>>()
+            .join(" ");
+        if icons.is_empty() {
+            return;
+        }
+        let row = Rect::new(
+            cell.x + 1,
+            cell.y + cell.height.saturating_sub(2),
+            cell.width.saturating_sub(2),
+            1,
+        );
+        Paragraph::new(Line::from(icons).centered())
+            .style(Style::new().bg(BOARD_BG))
+            .render(row, buf);
+    }
+}
+
+/// Draws the board interior: big MONOPOLY title plus either the main menu bar
+/// or the Community Chest / Chance card slots.
+fn render_center(area: Rect, overlay: &Overlay, buf: &mut Buffer) {
     let [top, middle, bottom] = Layout::vertical([
         Constraint::Percentage(34),
         Constraint::Percentage(32),
@@ -91,9 +133,32 @@ fn render_center(area: Rect, buf: &mut Buffer) {
     ])
     .areas(area);
 
-    render_card_slot(top, "COMMUNITY CHEST", "\u{f187}", CHEST_GOLD, buf);
     render_title(middle, buf);
-    render_card_slot(bottom, "CHANCE", "?", CHANCE_ORANGE, buf);
+    match *overlay {
+        Overlay::Menu { selected } => render_menu_bar(bottom, selected, buf),
+        Overlay::Board => {
+            render_card_slot(top, "COMMUNITY CHEST", "\u{f187}", CHEST_GOLD, buf);
+            render_card_slot(bottom, "CHANCE", "?", CHANCE_ORANGE, buf);
+        }
+    }
+}
+
+/// Red menu bar with the main-menu options; the selected row is highlighted.
+fn render_menu_bar(area: Rect, selected: usize, buf: &mut Buffer) {
+    let area = centered(area, 30, OPTIONS.len() as u16 + 2);
+    let block = Block::bordered().style(Style::new().bg(TITLE_RED).fg(Color::White).bold());
+    let inner = block.inner(area);
+    block.render(area, buf);
+
+    let lines: Vec<Line> = OPTIONS
+        .iter()
+        .enumerate()
+        .map(|(i, opt)| {
+            let line = Line::from(*opt).centered();
+            if i == selected { line.reversed() } else { line }
+        })
+        .collect();
+    Paragraph::new(lines).render(inner, buf);
 }
 
 /// Width of the big "MONOPOLY" title: 8 glyphs * 8 pixel columns.

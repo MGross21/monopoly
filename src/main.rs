@@ -3,24 +3,49 @@ use crossterm::cursor::MoveTo;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use crossterm::execute;
 use crossterm::terminal::{Clear, ClearType};
+use ratatui::style::Style;
+use ratatui::widgets::Block;
 use ratatui::{DefaultTerminal, Frame};
 use std::io::stdout;
 
 mod board;
 mod map;
+mod menu;
 mod player;
 mod setup;
 mod space;
 
-use crate::map::{BOARD_H, BOARD_W, Map, render_warning};
+use crate::map::{BOARD_BG, BOARD_H, BOARD_W, Map, Overlay, render_warning};
+use crate::menu::{Menu, MenuAction};
 use crate::player::Player;
 use crate::setup::Setup;
 
-/// Top-level screen: configuring a new game, or playing it.
+/// Top-level screen.
 enum App {
+    Menu(Menu),
     Setup(Setup),
-    #[allow(dead_code)] // players used once game logic lands
-    Playing { players: Vec<Player> },
+    Playing(Game),
+}
+
+/// An in-progress game.
+struct Game {
+    players: Vec<Player>,
+}
+
+impl Game {
+    fn new(players: Vec<Player>) -> Self {
+        Self { players }
+    }
+}
+
+/// How a key press changes the current screen. Computed while `app` is borrowed,
+/// then applied afterwards so we can reassign `app` cleanly.
+enum Transition {
+    Stay,
+    ToMenu,
+    ToSetup,
+    ToPlaying(Vec<Player>),
+    Quit,
 }
 
 fn main() -> Result<()> {
@@ -37,7 +62,7 @@ fn main() -> Result<()> {
 
 fn run(terminal: &mut DefaultTerminal) -> Result<()> {
     terminal.clear()?;
-    let mut app = App::Setup(Setup::new());
+    let mut app = App::Menu(Menu::new());
 
     loop {
         terminal.draw(|frame| render(frame, &app))?;
@@ -48,13 +73,34 @@ fn run(terminal: &mut DefaultTerminal) -> Result<()> {
         if key.kind != KeyEventKind::Press {
             continue;
         }
-        if matches!(key.code, KeyCode::Char('q') | KeyCode::Esc) {
+        if key.code == KeyCode::Char('q') {
             break;
         }
-        if let App::Setup(setup) = &mut app {
-            if let Some(players) = setup.handle_key(key.code) {
-                app = App::Playing { players };
+
+        let transition = match &mut app {
+            App::Menu(m) => match m.handle_key(key.code) {
+                MenuAction::NewGame => Transition::ToSetup,
+                MenuAction::Quit => Transition::Quit,
+                MenuAction::None => Transition::Stay,
+            },
+            App::Setup(s) => {
+                if key.code == KeyCode::Esc {
+                    Transition::ToMenu
+                } else if let Some(players) = s.handle_key(key.code) {
+                    Transition::ToPlaying(players)
+                } else {
+                    Transition::Stay
+                }
             }
+            App::Playing(_) => Transition::Stay,
+        };
+
+        match transition {
+            Transition::Stay => {}
+            Transition::ToMenu => app = App::Menu(Menu::new()),
+            Transition::ToSetup => app = App::Setup(Setup::new()),
+            Transition::ToPlaying(players) => app = App::Playing(Game::new(players)),
+            Transition::Quit => break,
         }
     }
     Ok(())
@@ -67,7 +113,16 @@ fn render(frame: &mut Frame, app: &App) {
         return;
     }
 
-    frame.render_widget(Map::default(), area); // board centers itself
+    // Green table fills the whole screen, behind and around the board.
+    frame.render_widget(Block::new().style(Style::new().bg(BOARD_BG)), area);
+
+    let map = match app {
+        App::Menu(m) => Map::new(Vec::new(), Overlay::Menu { selected: m.selected }),
+        App::Setup(_) => Map::new(Vec::new(), Overlay::Board),
+        App::Playing(g) => Map::new(g.players.clone(), Overlay::Board),
+    };
+    frame.render_widget(map, area);
+
     if let App::Setup(setup) = app {
         setup.render(frame);
     }
