@@ -1,74 +1,40 @@
 use color_eyre::eyre::Result;
 use crossterm::cursor::MoveTo;
-use crossterm::event::{self, Event, KeyCode, KeyEventKind};
+use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use crossterm::execute;
 use crossterm::terminal::{Clear, ClearType};
 use ratatui::style::Style;
 use ratatui::widgets::Block;
 use ratatui::{DefaultTerminal, Frame};
 use std::io::stdout;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 mod board;
 mod dice;
+mod game;
 mod map;
 mod menu;
 mod player;
 mod setup;
 mod space;
+mod ui;
 
-use crate::dice::{Animation, Roll};
+use crate::board::board;
+use crate::game::Game;
 use crate::map::{BOARD_BG, BOARD_H, BOARD_W, Map, Overlay, render_warning};
 use crate::menu::{Menu, MenuAction};
 use crate::player::Player;
 use crate::setup::Setup;
+use crate::ui::Confirm;
 
-/// Time each GIF frame is shown during a roll.
-const FRAME_TIME: Duration = Duration::from_millis(40);
+/// How often to wake while a game has live animation/notifications.
+const TICK: Duration = Duration::from_millis(33);
 
 /// Top-level screen.
 enum App {
     Menu(Menu),
     Setup(Setup),
-    Playing(Game),
-}
-
-/// An in-progress game.
-struct Game {
-    players: Vec<Player>,
-    anim: Animation,
-    roll: Option<Roll>,
-}
-
-impl Game {
-    fn new(players: Vec<Player>) -> Self {
-        Self {
-            players,
-            anim: Animation::load(),
-            roll: None,
-        }
-    }
-
-    /// True while a roll's GIF is still playing.
-    fn animating(&self) -> bool {
-        self.roll.as_ref().is_some_and(Roll::animating)
-    }
-
-    /// Advance the current roll's animation by one frame.
-    fn tick(&mut self) {
-        if let Some(roll) = &mut self.roll {
-            roll.tick(&self.anim);
-        }
-    }
-
-    /// Space starts a roll, or dismisses a finished one.
-    fn on_space(&mut self) {
-        match &self.roll {
-            None => self.roll = Some(Roll::new()),
-            Some(roll) if !roll.animating() => self.roll = None,
-            Some(_) => {} // mid-animation, ignore
-        }
-    }
+    Playing(Box<Game>),
 }
 
 /// How a key press changes the current screen. Computed while `app` is borrowed,
@@ -83,6 +49,11 @@ enum Transition {
 
 fn main() -> Result<()> {
     color_eyre::install()?;
+    // Decode the dice GIF off-thread while the user is in the menu, so neither
+    // starting a game nor the first roll stutters.
+    std::thread::spawn(|| {
+        let _ = dice::animation();
+    });
     // `init` enables raw mode + alternate screen so key presses register and
     // the board draws on its own screen; `restore` undoes it on the way out.
     let mut terminal = ratatui::init();
@@ -96,28 +67,63 @@ fn main() -> Result<()> {
 fn run(terminal: &mut DefaultTerminal) -> Result<()> {
     terminal.clear()?;
     let mut app = App::Menu(Menu::new());
+    let mut last = Instant::now();
+    let mut quit: Option<Confirm> = None;
 
     loop {
-        terminal.draw(|frame| render(frame, &app))?;
+        terminal.draw(|frame| render(frame, &mut app, quit.as_ref()))?;
 
-        // While a roll is animating, wake on a timer to advance frames; when
-        // idle, block until the next key so we don't spin.
-        let animating = matches!(&app, App::Playing(g) if g.animating());
-        if animating && !event::poll(FRAME_TIME)? {
-            if let App::Playing(g) = &mut app {
-                g.tick();
-            }
-            continue;
+        // Keep ticking while playing (the highlight breathes); otherwise block
+        // until the next key so we don't spin.
+        let timeout = match &app {
+            App::Playing(_) => Some(TICK),
+            _ => None,
+        };
+        let event = match timeout {
+            Some(t) if event::poll(t)? => Some(event::read()?),
+            Some(_) => None,       // timed out, no input this tick
+            None => Some(event::read()?), // idle: block here until a key
+        };
+
+        // Measure elapsed time AFTER any blocking wait, so a long idle block
+        // isn't charged to a roll that starts right after it.
+        let now = Instant::now();
+        let delta = now - last;
+        last = now;
+        if let App::Playing(g) = &mut app {
+            g.tick(delta);
         }
 
-        let Event::Key(key) = event::read()? else {
+        let Some(Event::Key(key)) = event else {
             continue;
         };
         if key.kind != KeyEventKind::Press {
             continue;
         }
-        if key.code == KeyCode::Char('q') {
-            break;
+
+        // Quit confirmation: q or Ctrl-C opens a Yes/No prompt.
+        if quit.is_some() {
+            match key.code {
+                KeyCode::Up | KeyCode::Down | KeyCode::Left | KeyCode::Right => {
+                    if let Some(c) = quit.as_mut() {
+                        c.toggle();
+                    }
+                }
+                KeyCode::Enter => {
+                    if quit.as_ref().is_some_and(Confirm::is_yes) {
+                        break;
+                    }
+                    quit = None;
+                }
+                KeyCode::Esc => quit = None,
+                _ => {}
+            }
+            continue;
+        }
+        let ctrl_c = key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL);
+        if key.code == KeyCode::Char('q') || ctrl_c {
+            quit = Some(Confirm::new());
+            continue;
         }
 
         let transition = match &mut app {
@@ -136,9 +142,7 @@ fn run(terminal: &mut DefaultTerminal) -> Result<()> {
                 }
             }
             App::Playing(g) => {
-                if key.code == KeyCode::Char(' ') {
-                    g.on_space();
-                }
+                g.handle_key(key.code);
                 Transition::Stay
             }
         };
@@ -147,14 +151,14 @@ fn run(terminal: &mut DefaultTerminal) -> Result<()> {
             Transition::Stay => {}
             Transition::ToMenu => app = App::Menu(Menu::new()),
             Transition::ToSetup => app = App::Setup(Setup::new()),
-            Transition::ToPlaying(players) => app = App::Playing(Game::new(players)),
+            Transition::ToPlaying(players) => app = App::Playing(Box::new(Game::new(players))),
             Transition::Quit => break,
         }
     }
     Ok(())
 }
 
-fn render(frame: &mut Frame, app: &App) {
+fn render(frame: &mut Frame, app: &mut App, quit: Option<&Confirm>) {
     let area = frame.area();
     if area.width < BOARD_W || area.height < BOARD_H {
         render_warning(area, frame.buffer_mut());
@@ -164,20 +168,20 @@ fn render(frame: &mut Frame, app: &App) {
     // Green table fills the whole screen, behind and around the board.
     frame.render_widget(Block::new().style(Style::new().bg(BOARD_BG)), area);
 
-    let map = match app {
-        App::Menu(m) => Map::new(Vec::new(), Overlay::Menu { selected: m.selected }),
-        App::Setup(_) => Map::new(Vec::new(), Overlay::Board),
-        App::Playing(g) => Map::new(g.players.clone(), Overlay::Board),
+    let (spaces, players, overlay) = match &*app {
+        App::Menu(m) => (board(), Vec::new(), Overlay::Menu { selected: m.selected }),
+        App::Setup(_) => (board(), Vec::new(), Overlay::Board { turn: 0, breath: 0.0 }),
+        App::Playing(g) => (g.board.clone(), g.players.clone(), g.overlay()),
     };
-    frame.render_widget(map, area);
+    frame.render_widget(Map::new(spaces, players, overlay), area);
 
     match app {
         App::Setup(setup) => setup.render(frame),
-        App::Playing(g) => {
-            if let Some(roll) = &g.roll {
-                dice::render(frame, &g.anim, roll);
-            }
-        }
+        App::Playing(g) => g.render(frame),
         App::Menu(_) => {}
+    }
+
+    if let Some(confirm) = quit {
+        confirm.render(frame, " Quit the game? ");
     }
 }

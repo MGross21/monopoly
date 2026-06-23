@@ -10,15 +10,16 @@ use ratatui::{
 
 use tui_big_text::{BigText, PixelSize};
 
-use crate::board::board;
 use crate::menu::OPTIONS;
 use crate::player::Player;
 use crate::space::Space;
+use crate::ui::centered_rect;
 
-/// What to draw in the hollow center: the main menu, or the card slots.
+/// What to draw in the hollow center: the main menu, or the in-game board
+/// (keybind bar + card slots), tagged with whose turn it is.
 pub enum Overlay {
     Menu { selected: usize },
-    Board,
+    Board { turn: usize, breath: f32 },
 }
 
 /// 11x11 grid; only the outer ring holds the 40 spaces.
@@ -35,6 +36,17 @@ pub const BOARD_BG: Color = Color::Rgb(0xCD, 0xE6, 0xD0);
 const TITLE_RED: Color = Color::Rgb(0xED, 0x1B, 0x24);
 const CHANCE_ORANGE: Color = Color::Rgb(0xF7, 0x94, 0x1D);
 const CHEST_GOLD: Color = Color::Rgb(0xC8, 0x96, 0x28);
+/// Darker green the highlighted cell breathes toward.
+const BOARD_BG_DARK: Color = Color::Rgb(0x8F, 0xA1, 0x91);
+
+/// Blend between the darker and normal board green by `f` (0..1).
+fn breathe(f: f32) -> Color {
+    let (Color::Rgb(dr, dg, db), Color::Rgb(br, bg, bb)) = (BOARD_BG_DARK, BOARD_BG) else {
+        return BOARD_BG;
+    };
+    let mix = |a: u8, b: u8| (a as f32 + (b as f32 - a as f32) * f) as u8;
+    Color::Rgb(mix(dr, br), mix(dg, bg), mix(db, bb))
+}
 
 pub struct Map {
     board: Vec<Space>,
@@ -43,9 +55,9 @@ pub struct Map {
 }
 
 impl Map {
-    pub fn new(players: Vec<Player>, overlay: Overlay) -> Self {
+    pub fn new(board: Vec<Space>, players: Vec<Player>, overlay: Overlay) -> Self {
         Self {
-            board: board(),
+            board,
             players,
             overlay,
         }
@@ -72,6 +84,13 @@ impl Widget for Map {
         // Green fills the board, including the hollow center; cells draw on top.
         Block::new().style(Style::new().bg(BOARD_BG)).render(area, buf);
 
+        // The current player's cell breathes between board green and a darker
+        // green; everything else uses the flat board green.
+        let breathing = match self.overlay {
+            Overlay::Board { turn, breath } => self.players.get(turn).map(|p| (p.position, breath)),
+            Overlay::Menu { .. } => None,
+        };
+
         // `areas::<N>` returns a stack array, no per-frame heap allocation.
         let vertical = Layout::vertical([Constraint::Length(cell_h); SIZE]);
         let horizontal = Layout::horizontal([Constraint::Length(cell_w); SIZE]);
@@ -81,7 +100,11 @@ impl Widget for Map {
                 let Some(index) = ring_index(r, c, SIZE, SIZE) else {
                     continue; // interior cell
                 };
-                render_space(&self.board[index], cell, buf);
+                let bg = match breathing {
+                    Some((pos, breath)) if pos == index => breathe(breath),
+                    _ => BOARD_BG,
+                };
+                render_space(&self.board[index], cell, bg, buf);
                 self.render_tokens(index, cell, buf);
             }
         }
@@ -123,29 +146,49 @@ impl Map {
     }
 }
 
-/// Draws the board interior: big MONOPOLY title plus either the main menu bar
-/// or the Community Chest / Chance card slots.
+/// Draws the board interior. The main menu shows the title + menu bar; in-game
+/// shows the title, a thin keybind bar, then the two card slots.
 fn render_center(area: Rect, overlay: &Overlay, buf: &mut Buffer) {
-    let [top, middle, bottom] = Layout::vertical([
-        Constraint::Percentage(34),
-        Constraint::Percentage(32),
-        Constraint::Percentage(34),
-    ])
-    .areas(area);
+    // Title is vertically centered in the whole center; menus/cards sit at the
+    // bottom (drawn after, and the title only paints its glyph cells anyway).
+    render_title(area, buf);
 
-    render_title(middle, buf);
     match *overlay {
-        Overlay::Menu { selected } => render_menu_bar(bottom, selected, buf),
-        Overlay::Board => {
-            render_card_slot(top, "COMMUNITY CHEST", "\u{f187}", CHEST_GOLD, buf);
-            render_card_slot(bottom, "CHANCE", "?", CHANCE_ORANGE, buf);
+        Overlay::Menu { selected } => {
+            let [_, bar] = Layout::vertical([Constraint::Min(0), Constraint::Length(4)]).areas(area);
+            render_menu_bar(bar, selected, buf);
+        }
+        Overlay::Board { turn, .. } => {
+            let [_, keys, cards] = Layout::vertical([
+                Constraint::Min(0),
+                Constraint::Length(1),
+                Constraint::Length(8),
+            ])
+            .areas(area);
+            render_keybar(keys, turn, buf);
+
+            let [chest, chance] =
+                Layout::horizontal([Constraint::Ratio(1, 2), Constraint::Ratio(1, 2)]).areas(cards);
+            render_card_slot(chest, "COMMUNITY CHEST", "\u{f187}", CHEST_GOLD, buf);
+            render_card_slot(chance, "CHANCE", "?", CHANCE_ORANGE, buf);
         }
     }
 }
 
+/// Thin keybind bar showing whose turn it is and the global keys.
+fn render_keybar(area: Rect, turn: usize, buf: &mut Buffer) {
+    let text = format!(
+        "Player {}'s turn   ·   m Menu   ·   Space Roll   ·   q Quit",
+        turn + 1
+    );
+    Paragraph::new(Line::from(text).centered())
+        .style(Style::new().bg(TITLE_RED).fg(Color::White).bold())
+        .render(area, buf);
+}
+
 /// Red menu bar with the main-menu options; the selected row is highlighted.
 fn render_menu_bar(area: Rect, selected: usize, buf: &mut Buffer) {
-    let area = centered(area, 30, OPTIONS.len() as u16 + 2);
+    let area = centered_rect(area, 30, OPTIONS.len() as u16 + 2);
     let block = Block::bordered().style(Style::new().bg(TITLE_RED).fg(Color::White).bold());
     let inner = block.inner(area);
     block.render(area, buf);
@@ -201,25 +244,59 @@ pub fn render_warning(area: Rect, buf: &mut Buffer) {
         .render(banner, buf);
 }
 
-/// Big block-glyph "MONOPOLY", centered in `area`.
+/// "MONOPOLY" in big block glyphs, upscaled to fill `area` and centered.
+///
+/// `tui-big-text`'s largest size is 8x8 cells per glyph, so to go bigger we
+/// render it once into a scratch buffer, then copy each cell as a `scale`x`scale`
+/// block. `scale` auto-fits the area (1x on the cramped warning screen, 2x+ on
+/// the board).
 fn render_title(area: Rect, buf: &mut Buffer) {
-    let title = BigText::builder()
+    const TW: u16 = 8 * 8; // "MONOPOLY" = 8 glyphs of 8 columns
+    const TH: u16 = 8; // glyph height
+    const MAX_SCALE: u16 = 2;
+
+    let scale = (area.width / TW)
+        .min(area.height / TH)
+        .clamp(1, MAX_SCALE);
+
+    // Render the title at base size into a scratch buffer.
+    let rect = Rect::new(0, 0, TW, TH);
+    let mut scratch = Buffer::empty(rect);
+    BigText::builder()
         .pixel_size(PixelSize::Full)
-        .centered()
         .lines(vec!["MONOPOLY".into()])
         .style(Style::new().fg(TITLE_RED).bold())
-        .build();
+        .build()
+        .render(rect, &mut scratch);
 
-    // A glyph is 8 rows tall; center that band vertically.
-    let [band] = Layout::vertical([Constraint::Length(8)])
-        .flex(Flex::Center)
-        .areas(area);
-    title.render(band, buf);
+    // Blit each scratch cell as a scale x scale block, centered in `area`.
+    let (dw, dh) = (TW * scale, TH * scale);
+    let x0 = area.x + area.width.saturating_sub(dw) / 2;
+    let y0 = area.y + area.height.saturating_sub(dh) / 2;
+    for y in 0..TH {
+        for x in 0..TW {
+            let Some(src) = scratch.cell((x, y)).cloned() else {
+                continue;
+            };
+            // Skip blank cells so the green board shows through behind the text.
+            if src.symbol() == " " || src.symbol().is_empty() {
+                continue;
+            }
+            for dy in 0..scale {
+                for dx in 0..scale {
+                    let pos = (x0 + x * scale + dx, y0 + y * scale + dy);
+                    if let Some(dest) = buf.cell_mut(pos) {
+                        *dest = src.clone();
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// A bordered card pile with a centered label and icon.
 fn render_card_slot(area: Rect, label: &str, icon: &str, color: Color, buf: &mut Buffer) {
-    let area = centered(area, 40, 7);
+    let area = centered_rect(area, 40, 7);
     let block = Block::bordered()
         .title_top(Line::from(label).centered())
         .style(Style::new().fg(color).bold());
@@ -233,17 +310,6 @@ fn render_card_slot(area: Rect, label: &str, icon: &str, color: Color, buf: &mut
     Paragraph::new(Line::from(icon).centered())
         .style(Style::new().fg(color).bold())
         .render(icon_row, buf);
-}
-
-/// Centers a `width` x `height` rect inside `area`.
-fn centered(area: Rect, width: u16, height: u16) -> Rect {
-    let [area] = Layout::horizontal([Constraint::Length(width)])
-        .flex(Flex::Center)
-        .areas(area);
-    let [area] = Layout::vertical([Constraint::Length(height)])
-        .flex(Flex::Center)
-        .areas(area);
-    area
 }
 
 /// Ring cell (row, col) -> board index 0..40, clockwise from GO at the
@@ -267,9 +333,9 @@ fn ring_index(r: usize, c: usize, rows: usize, cols: usize) -> Option<usize> {
 
 /// Bordered cell: name on top, price/owner on the bottom, border tinted by
 /// color group for properties.
-fn render_space(space: &Space, area: Rect, buf: &mut Buffer) {
+fn render_space(space: &Space, area: Rect, bg: Color, buf: &mut Buffer) {
     let mut block = Block::bordered()
-        .style(Style::new().bg(BOARD_BG).fg(Color::Black).bold())
+        .style(Style::new().bg(bg).fg(Color::Black).bold())
         .title_top(Line::from(short_name(space, area.width)).centered());
 
     let detail = detail_line(space);

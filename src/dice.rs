@@ -2,34 +2,50 @@
 //! and their total.
 
 use std::io::Cursor;
+use std::sync::OnceLock;
+use std::time::Duration;
 
 use image::AnimationDecoder;
 use image::codecs::gif::GifDecoder;
 use image::imageops::FilterType;
 use ratatui::{
     Frame,
-    layout::{Constraint, Flex, Layout, Rect},
     style::{Color, Style, Stylize},
     text::{Line, Span, Text},
     widgets::{Block, Clear, Paragraph},
 };
+
+use crate::ui::centered_rect;
 
 /// ASCII output size of the GIF frames (cols x rows).
 const FRAME_COLS: u16 = 48;
 const FRAME_ROWS: u16 = 18;
 /// Luminance ramp, dark to light.
 const RAMP: &[u8] = b" .:-=+*#%@";
+/// How long each GIF frame is shown.
+const FRAME_TIME: Duration = Duration::from_millis(40);
 
-/// The dice GIF, decoded once into colored ASCII frames.
+/// The dice GIF, decoded once and cached (decoding is slow).
+pub fn animation() -> &'static Animation {
+    static ANIM: OnceLock<Animation> = OnceLock::new();
+    ANIM.get_or_init(|| Animation::load(include_bytes!("../assets/dice.gif")))
+}
+
+/// The card-draw GIF (Chance / Community Chest), decoded once and cached.
+pub fn card_animation() -> &'static Animation {
+    static ANIM: OnceLock<Animation> = OnceLock::new();
+    ANIM.get_or_init(|| Animation::load(include_bytes!("../assets/moving_card.gif")))
+}
+
+/// A GIF decoded into colored ASCII frames.
 pub struct Animation {
     frames: Vec<Text<'static>>,
 }
 
 impl Animation {
-    /// Decode the embedded GIF into ASCII frames. Done once per game.
-    pub fn load() -> Self {
-        let bytes = include_bytes!("../assets/dice.gif");
-        let decoder = GifDecoder::new(Cursor::new(bytes.as_slice())).expect("decode dice.gif");
+    /// Decode embedded GIF bytes into ASCII frames.
+    fn load(bytes: &[u8]) -> Self {
+        let decoder = GifDecoder::new(Cursor::new(bytes)).expect("decode gif");
         let frames = decoder
             .into_frames()
             .collect_frames()
@@ -41,18 +57,56 @@ impl Animation {
     fn len(&self) -> usize {
         self.frames.len()
     }
+
+    fn frame(&self, index: usize) -> &Text<'static> {
+        &self.frames[index.min(self.frames.len() - 1)]
+    }
 }
 
-/// State of one in-progress roll.
-pub struct Roll {
+/// Plays an `Animation` once, frame by frame.
+pub struct Clip {
     frame: usize,
+    elapsed: Duration,
+}
+
+impl Clip {
+    pub fn new() -> Self {
+        Self {
+            frame: 0,
+            elapsed: Duration::ZERO,
+        }
+    }
+
+    pub fn finished(&self, anim: &Animation) -> bool {
+        self.frame + 1 >= anim.len()
+    }
+
+    pub fn tick(&mut self, anim: &Animation, delta: Duration) {
+        if self.finished(anim) {
+            return;
+        }
+        self.elapsed += delta;
+        while self.elapsed >= FRAME_TIME {
+            self.elapsed -= FRAME_TIME;
+            if self.frame + 1 < anim.len() {
+                self.frame += 1;
+            } else {
+                break;
+            }
+        }
+    }
+}
+
+/// A dice roll: plays the GIF, then settles on two random values.
+pub struct Roll {
+    clip: Clip,
     result: Option<(u8, u8)>,
 }
 
 impl Roll {
     pub fn new() -> Self {
         Self {
-            frame: 0,
+            clip: Clip::new(),
             result: None,
         }
     }
@@ -62,11 +116,18 @@ impl Roll {
         self.result.is_none()
     }
 
-    /// Advance one GIF frame; roll the dice once the GIF finishes.
-    pub fn tick(&mut self, anim: &Animation) {
-        if self.frame + 1 < anim.len() {
-            self.frame += 1;
-        } else if self.result.is_none() {
+    /// The rolled dice, once the animation has finished.
+    pub fn result(&self) -> Option<(u8, u8)> {
+        self.result
+    }
+
+    /// Advance the GIF; roll the dice once it finishes.
+    pub fn tick(&mut self, anim: &Animation, delta: Duration) {
+        if self.result.is_some() {
+            return;
+        }
+        self.clip.tick(anim, delta);
+        if self.clip.finished(anim) {
             self.result = Some((rand::random_range(1..=6), rand::random_range(1..=6)));
         }
     }
@@ -75,15 +136,20 @@ impl Roll {
 /// Draws the roll popup centered over the board.
 pub fn render(frame: &mut Frame, anim: &Animation, roll: &Roll) {
     match roll.result {
-        None => render_animation(frame, &anim.frames[roll.frame]),
+        None => render_animation(frame, anim.frame(roll.clip.frame), " Rolling "),
         Some((a, b)) => render_result(frame, a, b),
     }
 }
 
-fn render_animation(frame: &mut Frame, ascii: &Text<'static>) {
-    let area = popup(frame.area(), FRAME_COLS + 2, FRAME_ROWS + 2);
+/// Draws a playing clip (e.g. the card-draw animation) as a titled popup.
+pub fn render_clip(frame: &mut Frame, anim: &Animation, clip: &Clip, title: &str) {
+    render_animation(frame, anim.frame(clip.frame), title);
+}
+
+fn render_animation(frame: &mut Frame, ascii: &Text<'static>, title: &str) {
+    let area = centered_rect(frame.area(), FRAME_COLS + 2, FRAME_ROWS + 2);
     let block = Block::bordered()
-        .title(" Rolling ")
+        .title(title.to_string())
         .style(Style::new().bg(Color::Black));
     let inner = block.inner(area);
     frame.render_widget(Clear, area);
@@ -92,7 +158,7 @@ fn render_animation(frame: &mut Frame, ascii: &Text<'static>) {
 }
 
 fn render_result(frame: &mut Frame, a: u8, b: u8) {
-    let area = popup(frame.area(), 24, 9);
+    let area = centered_rect(frame.area(), 24, 9);
     let block = Block::bordered()
         .title(" Roll ")
         .style(Style::new().bg(Color::Black).fg(Color::White).bold());
@@ -148,11 +214,12 @@ fn pips(value: u8) -> [[bool; 3]; 3] {
 
 /// Downscale one GIF frame and map it to colored ASCII.
 fn asciify(rgba: &image::RgbaImage) -> Text<'static> {
+    // Nearest is far cheaper than bilinear and indistinguishable at this size.
     let small = image::imageops::resize(
         rgba,
         FRAME_COLS as u32,
         FRAME_ROWS as u32,
-        FilterType::Triangle,
+        FilterType::Nearest,
     );
     let mut lines = Vec::with_capacity(FRAME_ROWS as usize);
     for y in 0..FRAME_ROWS as u32 {
@@ -171,15 +238,4 @@ fn asciify(rgba: &image::RgbaImage) -> Text<'static> {
         lines.push(Line::from(spans));
     }
     Text::from(lines)
-}
-
-/// Centers a `width` x `height` popup in `area`.
-fn popup(area: Rect, width: u16, height: u16) -> Rect {
-    let [area] = Layout::horizontal([Constraint::Length(width)])
-        .flex(Flex::Center)
-        .areas(area);
-    let [area] = Layout::vertical([Constraint::Length(height)])
-        .flex(Flex::Center)
-        .areas(area);
-    area
 }

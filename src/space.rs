@@ -93,6 +93,43 @@ impl Space {
         }
     }
 
+    /// Can this space be bought (street, railroad, utility)?
+    pub fn is_ownable(&self) -> bool {
+        matches!(
+            self,
+            Space::Property(_) | Space::Railroad(_) | Space::Utility(_)
+        )
+    }
+
+    /// Printed purchase price, if any.
+    pub fn price(&self) -> Option<u32> {
+        match self {
+            Space::Property(p) => Some(p.price),
+            Space::Railroad(r) => Some(r.price),
+            Space::Utility(u) => Some(u.price),
+            _ => None,
+        }
+    }
+
+    /// Current owner's player index, if owned.
+    pub fn owner(&self) -> Option<usize> {
+        match self {
+            Space::Property(p) => p.owner,
+            Space::Railroad(r) => r.owner,
+            Space::Utility(u) => u.owner,
+            _ => None,
+        }
+    }
+
+    pub fn set_owner(&mut self, who: Option<usize>) {
+        match self {
+            Space::Property(p) => p.owner = who,
+            Space::Railroad(r) => r.owner = who,
+            Space::Utility(u) => u.owner = who,
+            _ => {}
+        }
+    }
+
     /// Banner icon for non-property spaces. `None` = show the name only.
     ///
     /// Nerd Font glyphs (monochrome, honor `fg`/bold) — needs a Nerd Font in the

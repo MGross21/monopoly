@@ -6,13 +6,13 @@
 use crossterm::event::KeyCode;
 use ratatui::{
     Frame,
-    layout::{Constraint, Flex, Layout, Rect},
     style::{Color, Style, Stylize},
     text::Line,
     widgets::{Block, Clear, Paragraph},
 };
 
 use crate::player::{Piece, Player};
+use crate::ui::centered_rect;
 
 const MIN_PLAYERS: usize = 2;
 const MAX_PLAYERS: usize = 8;
@@ -112,7 +112,7 @@ impl Setup {
 
     pub fn render(&self, frame: &mut Frame) {
         let height = self.field_count() as u16 + 4; // fields + border + hint
-        let area = popup_area(frame.area(), POPUP_WIDTH, height);
+        let area = centered_rect(frame.area(), POPUP_WIDTH, height);
 
         let block = Block::bordered()
             .title(" New Game ")
@@ -150,15 +150,4 @@ impl Setup {
 
 fn default_pieces(count: usize) -> Vec<Piece> {
     Piece::ALL.into_iter().take(count).collect()
-}
-
-/// Centers a `width` x `height` rect inside `area`.
-fn popup_area(area: Rect, width: u16, height: u16) -> Rect {
-    let [area] = Layout::horizontal([Constraint::Length(width)])
-        .flex(Flex::Center)
-        .areas(area);
-    let [area] = Layout::vertical([Constraint::Length(height)])
-        .flex(Flex::Center)
-        .areas(area);
-    area
 }
