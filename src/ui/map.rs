@@ -3,17 +3,17 @@
 use ratatui::{
     buffer::Buffer,
     layout::{Alignment, Constraint, Flex, Layout, Rect},
-    style::{Color, Style, Stylize},
+    style::{Color, Style},
     text::Line,
     widgets::{Block, Paragraph, Widget, Wrap},
 };
 
 use tui_big_text::{BigText, PixelSize};
 
-use crate::menu::OPTIONS;
+use crate::ui::menu::OPTIONS;
 use crate::player::Player;
 use crate::space::Space;
-use crate::ui::centered_rect;
+use crate::ui::{centered_rect, selectable_lines};
 
 /// What to draw in the hollow center: the main menu, or the in-game board
 /// (keybind bar + card slots), tagged with whose turn it is.
@@ -48,14 +48,14 @@ fn breathe(f: f32) -> Color {
     Color::Rgb(mix(dr, br), mix(dg, bg), mix(db, bb))
 }
 
-pub struct Map {
-    board: Vec<Space>,
-    players: Vec<Player>,
+pub struct Map<'a> {
+    board: &'a [Space],
+    players: &'a [Player],
     overlay: Overlay,
 }
 
-impl Map {
-    pub fn new(board: Vec<Space>, players: Vec<Player>, overlay: Overlay) -> Self {
+impl<'a> Map<'a> {
+    pub fn new(board: &'a [Space], players: &'a [Player], overlay: Overlay) -> Self {
         Self {
             board,
             players,
@@ -64,7 +64,7 @@ impl Map {
     }
 }
 
-impl Widget for Map {
+impl Widget for Map<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
         // Scale cells to fill the terminal, never below the minimum. The caller
         // guarantees the area is at least BOARD_W x BOARD_H.
@@ -124,7 +124,7 @@ impl Widget for Map {
     }
 }
 
-impl Map {
+impl Map<'_> {
     /// Draws the tokens of any players standing on `index` along the cell's
     /// bottom inner row.
     fn render_tokens(&self, index: usize, cell: Rect, buf: &mut Buffer) {
@@ -196,16 +196,7 @@ fn render_menu_bar(area: Rect, selected: usize, buf: &mut Buffer) {
     let block = Block::bordered().style(Style::new().bg(TITLE_RED).fg(Color::White).bold());
     let inner = block.inner(area);
     block.render(area, buf);
-
-    let lines: Vec<Line> = OPTIONS
-        .iter()
-        .enumerate()
-        .map(|(i, opt)| {
-            let line = Line::from(*opt).centered();
-            if i == selected { line.reversed() } else { line }
-        })
-        .collect();
-    Paragraph::new(lines).render(inner, buf);
+    Paragraph::new(selectable_lines(&OPTIONS, selected)).render(inner, buf);
 }
 
 /// Width of the big "MONOPOLY" title: 8 glyphs * 8 pixel columns.
@@ -375,21 +366,17 @@ fn short_name(space: &Space, cell_width: u16) -> String {
     space.name().chars().take(max).collect()
 }
 
-/// Owner (with their token) if bought, else price, else blank.
+/// Owner (with their token) if bought, else price; "-$amount" for tax; blank
+/// otherwise.
 fn detail_line(space: &Space, owner_icon: Option<&str>) -> String {
+    if space.is_ownable() {
+        return match space.owner() {
+            Some(player) => format!("P{} {}", player + 1, owner_icon.unwrap_or("")),
+            None => format!("${}", space.price().unwrap_or(0)),
+        };
+    }
     match space {
-        Space::Property(p) => owned_or_price(p.owner, p.price, owner_icon),
-        Space::Railroad(r) => owned_or_price(r.owner, r.price, owner_icon),
-        Space::Utility(u) => owned_or_price(u.owner, u.price, owner_icon),
         Space::Tax(amount) => format!("-${amount}"),
         _ => String::new(),
-    }
-}
-
-/// "P1 🎩" if owned, otherwise the price like "$200".
-fn owned_or_price(owner: Option<usize>, price: u32, icon: Option<&str>) -> String {
-    match owner {
-        Some(player) => format!("P{} {}", player + 1, icon.unwrap_or("")),
-        None => format!("${price}"),
     }
 }

@@ -6,21 +6,24 @@ use std::time::Duration;
 use crossterm::event::KeyCode;
 use ratatui::{
     Frame,
-    style::{Color, Style, Stylize},
+    style::{Color, Style},
     text::Line,
-    widgets::{Block, BorderType, Clear, Padding, Paragraph},
+    widgets::{BorderType, Padding},
 };
 use ratatui_notifications::{
     Anchor, Animation as ToastAnimation, AutoDismiss, Level, Notification, Notifications,
     SizeConstraint,
 };
 
+mod action;
+
 use crate::board::board;
-use crate::dice::{self, Clip, Roll};
-use crate::map::Overlay;
 use crate::player::Player;
 use crate::space::Space;
-use crate::ui::{Confirm, centered_rect};
+use crate::ui::dice::{self, Clip, Roll};
+use crate::ui::map::Overlay;
+use crate::ui::{Confirm, ConfirmResult};
+use action::{ActionMenu, TurnAction, action_for_hotkey};
 
 const GO_SALARY: u32 = 200;
 const JAIL_INDEX: usize = 10;
@@ -30,16 +33,24 @@ pub struct Game {
     pub players: Vec<Player>,
     pub board: Vec<Space>,
     pub current: usize,
-    pub roll: Option<Roll>,
-    pub menu: Option<ActionMenu>,
-    card: Option<CardDraw>,
-    confirm_end: Option<Confirm>,
-    info: Option<InfoBox>,
+    modal: Modal,
     notes: Notifications,
     doubles: u8,
     can_roll: bool,
     has_rolled: bool, // rolled at least once this turn
     clock: Duration,  // drives the breathing highlight
+}
+
+/// The single popup the game is currently showing, if any. Holding these in one
+/// enum makes the precedence between them explicit (one is active at a time) and
+/// keeps `handle_key`/`render` in lockstep.
+enum Modal {
+    None,
+    Roll(Roll),
+    Card(CardDraw),
+    Menu(ActionMenu),
+    ConfirmEnd(Confirm),
+    Info(InfoBox),
 }
 
 /// A Chance / Community Chest card animation playing in the center.
@@ -60,11 +71,7 @@ impl Game {
             players,
             board: board(),
             current: 0,
-            roll: None,
-            menu: None,
-            card: None,
-            confirm_end: None,
-            info: None,
+            modal: Modal::None,
             // Cap how many toasts stack at once so a single turn's events don't
             // pile up and flicker.
             notes: Notifications::new().max_concurrent(Some(4)),
@@ -90,10 +97,6 @@ impl Game {
         (t.sin() + 1.0) / 2.0
     }
 
-    fn animating(&self) -> bool {
-        self.roll.as_ref().is_some_and(Roll::animating)
-    }
-
     /// Advance time: clock, notifications, and any playing animation.
     pub fn tick(&mut self, delta: Duration) {
         self.clock += delta;
@@ -101,7 +104,7 @@ impl Game {
 
         // Advance a roll; apply its result once the dice settle.
         let mut finished_roll = None;
-        if let Some(roll) = &mut self.roll {
+        if let Modal::Roll(roll) = &mut self.modal {
             let was_animating = roll.animating();
             roll.tick(dice::animation(), delta);
             if was_animating && !roll.animating() {
@@ -113,10 +116,10 @@ impl Game {
         }
 
         // Advance a card draw; close it when it finishes.
-        if let Some(card) = &mut self.card {
+        if let Modal::Card(card) = &mut self.modal {
             card.clip.tick(dice::card_animation(), delta);
             if card.clip.finished(dice::card_animation()) {
-                self.card = None;
+                self.modal = Modal::None;
             }
         }
     }
@@ -124,74 +127,57 @@ impl Game {
     // --- input ---------------------------------------------------------------
 
     pub fn handle_key(&mut self, key: KeyCode) {
-        // An info popup blocks everything; any key dismisses it.
-        if self.info.is_some() {
-            self.info = None;
-            return;
-        }
+        match &mut self.modal {
+            // An info popup blocks everything; any key dismisses it.
+            Modal::Info(_) => self.modal = Modal::None,
 
-        // End-turn confirmation takes priority.
-        if self.confirm_end.is_some() {
-            match key {
-                KeyCode::Up | KeyCode::Down | KeyCode::Left | KeyCode::Right => {
-                    if let Some(c) = &mut self.confirm_end {
-                        c.toggle();
-                    }
+            // End-turn confirmation takes priority.
+            Modal::ConfirmEnd(confirm) => match confirm.handle_key(key) {
+                ConfirmResult::Pending => {}
+                ConfirmResult::Yes => {
+                    self.modal = Modal::None;
+                    self.end_turn();
                 }
-                KeyCode::Enter => {
-                    let yes = self.confirm_end.as_ref().is_some_and(Confirm::is_yes);
-                    self.confirm_end = None;
-                    if yes {
-                        self.end_turn();
-                    }
-                }
-                KeyCode::Esc => self.confirm_end = None,
-                _ => {}
-            }
-            return;
-        }
+                ConfirmResult::No => self.modal = Modal::None,
+            },
 
-        if let Some(menu) = &mut self.menu {
-            match key {
+            Modal::Menu(menu) => match key {
                 KeyCode::Up => menu.prev(),
                 KeyCode::Down => menu.next(),
-                KeyCode::Esc => self.menu = None,
+                KeyCode::Esc => self.modal = Modal::None,
                 KeyCode::Enter => {
                     let action = menu.selected();
-                    self.menu = None;
+                    self.modal = Modal::None;
                     self.run(action);
                 }
                 _ => {}
-            }
-            return;
-        }
+            },
 
-        // A card animation blocks input; Space/Enter skips it.
-        if self.card.is_some() {
-            if matches!(key, KeyCode::Char(' ') | KeyCode::Enter) {
-                self.card = None;
-            }
-            return;
-        }
-
-        if self.roll.is_some() {
-            // Dismiss the dice popup once the animation is done.
-            if matches!(key, KeyCode::Char(' ') | KeyCode::Enter) && !self.animating() {
-                self.roll = None;
-            }
-            return;
-        }
-
-        match key {
-            KeyCode::Char('m') | KeyCode::Enter => self.menu = Some(ActionMenu::new()),
-            KeyCode::Char(' ') => self.start_roll(),
-            // Action hotkeys work outside the menu for faster turns.
-            KeyCode::Char(c) => {
-                if let Some(action) = action_for_hotkey(c) {
-                    self.run(action);
+            // A card animation blocks input; Space/Enter skips it.
+            Modal::Card(_) => {
+                if matches!(key, KeyCode::Char(' ') | KeyCode::Enter) {
+                    self.modal = Modal::None;
                 }
             }
-            _ => {}
+
+            // Dismiss the dice popup once the animation is done.
+            Modal::Roll(roll) => {
+                if matches!(key, KeyCode::Char(' ') | KeyCode::Enter) && !roll.animating() {
+                    self.modal = Modal::None;
+                }
+            }
+
+            Modal::None => match key {
+                KeyCode::Char('m') | KeyCode::Enter => self.modal = Modal::Menu(ActionMenu::new()),
+                KeyCode::Char(' ') => self.start_roll(),
+                // Action hotkeys work outside the menu for faster turns.
+                KeyCode::Char(c) => {
+                    if let Some(action) = action_for_hotkey(c) {
+                        self.run(action);
+                    }
+                }
+                _ => {}
+            },
         }
     }
 
@@ -201,12 +187,11 @@ impl Game {
             TurnAction::BuyProperty => self.buy_current(),
             TurnAction::EndTurn => {
                 if self.has_rolled {
-                    self.confirm_end = Some(Confirm::new());
+                    self.modal = Modal::ConfirmEnd(Confirm::new());
                 } else {
                     self.notify("Roll the dice before ending your turn", Level::Warn);
                 }
             }
-
             TurnAction::ViewInventory => self.show_inventory(),
             TurnAction::Trade => self.notify("Trading is not implemented yet", Level::Warn),
             TurnAction::Mortgages => self.notify("Mortgages are not implemented yet", Level::Warn),
@@ -216,14 +201,14 @@ impl Game {
     // --- actions -------------------------------------------------------------
 
     fn start_roll(&mut self) {
-        if self.roll.is_some() {
+        if matches!(self.modal, Modal::Roll(_)) {
             return; // already rolling
         }
         if !self.can_roll {
             self.notify("You already rolled — end your turn", Level::Warn);
             return;
         }
-        self.roll = Some(Roll::new());
+        self.modal = Modal::Roll(Roll::new());
     }
 
     /// Apply a finished dice roll: move, pass GO, resolve the landing, doubles.
@@ -260,11 +245,8 @@ impl Game {
         } else {
             self.can_roll = false;
         }
-
-        // If a card animation started on landing, drop the dice popup so it shows.
-        if self.card.is_some() {
-            self.roll = None;
-        }
+        // If landing started a card draw, `resolve_landing` already swapped the
+        // modal from the dice popup to the card; nothing more to do here.
     }
 
     /// React to the space the current player landed on.
@@ -289,7 +271,7 @@ impl Game {
 
     /// Start the card-draw animation for a Chance / Community Chest landing.
     fn draw_card(&mut self, title: &'static str) {
-        self.card = Some(CardDraw {
+        self.modal = Modal::Card(CardDraw {
             clip: Clip::new(),
             title,
         });
@@ -337,7 +319,7 @@ impl Game {
                 None => s.name().to_string(),
             })
             .collect();
-        self.info = Some(InfoBox {
+        self.modal = Modal::Info(InfoBox {
             title: format!(" Player {} — ${} ", me + 1, self.players[me].money),
             lines,
         });
@@ -357,14 +339,23 @@ impl Game {
         self.notify(format!("Player {} paid ${amount} in tax", who + 1), Level::Warn);
     }
 
+    /// Transfer rent from the current player to `owner`. Only what the payer can
+    /// actually afford moves — no money is created out of nothing.
     fn pay_player(&mut self, owner: usize, rent: u32) {
         let who = self.current;
-        self.players[who].money = self.players[who].money.saturating_sub(rent);
-        self.players[owner].money += rent;
-        self.notify(
-            format!("Player {} paid ${rent} rent to Player {}", who + 1, owner + 1),
-            Level::Warn,
-        );
+        let paid = self.players[who].money.min(rent);
+        self.players[who].money -= paid;
+        self.players[owner].money += paid;
+        let msg = if paid < rent {
+            format!(
+                "Player {} could only pay ${paid} of ${rent} rent to Player {}",
+                who + 1,
+                owner + 1
+            )
+        } else {
+            format!("Player {} paid ${paid} rent to Player {}", who + 1, owner + 1)
+        };
+        self.notify(msg, Level::Warn);
     }
 
     /// Rent owed for the space at `pos`, owned by `owner`.
@@ -421,20 +412,15 @@ impl Game {
     // --- rendering of popups & notifications ---------------------------------
 
     pub fn render(&mut self, frame: &mut Frame) {
-        if let Some(roll) = &self.roll {
-            dice::render(frame, dice::animation(), roll);
-        }
-        if let Some(card) = &self.card {
-            dice::render_clip(frame, dice::card_animation(), &card.clip, card.title);
-        }
-        if let Some(menu) = &self.menu {
-            menu.render(frame, self.current, self.players[self.current].money);
-        }
-        if let Some(confirm) = &self.confirm_end {
-            confirm.render(frame, " End your turn? ");
-        }
-        if let Some(info) = &self.info {
-            crate::ui::info_popup(frame, &info.title, &info.lines);
+        match &self.modal {
+            Modal::Roll(roll) => dice::render(frame, dice::animation(), roll),
+            Modal::Card(card) => {
+                dice::render_clip(frame, dice::card_animation(), &card.clip, card.title)
+            }
+            Modal::Menu(menu) => menu.render(frame, self.current, self.players[self.current].money),
+            Modal::ConfirmEnd(confirm) => confirm.render(frame, " End your turn? "),
+            Modal::Info(info) => crate::ui::info_popup(frame, &info.title, &info.lines),
+            Modal::None => {}
         }
         let area = frame.area();
         self.notes.render(frame, area);
@@ -445,98 +431,3 @@ enum Kind {
     Railroad,
     Utility,
 }
-
-// --- per-turn action menu ---------------------------------------------------
-
-#[derive(Clone, Copy)]
-pub enum TurnAction {
-    RollDice,
-    BuyProperty,
-    Trade,
-    ViewInventory,
-    Mortgages,
-    EndTurn,
-}
-
-const ACTIONS: [TurnAction; 6] = [
-    TurnAction::RollDice,
-    TurnAction::BuyProperty,
-    TurnAction::Trade,
-    TurnAction::ViewInventory,
-    TurnAction::Mortgages,
-    TurnAction::EndTurn,
-];
-
-fn action_label(action: TurnAction) -> &'static str {
-    match action {
-        TurnAction::RollDice => "Roll Dice",
-        TurnAction::BuyProperty => "Buy Property",
-        TurnAction::Trade => "Trade",
-        TurnAction::ViewInventory => "View Inventory",
-        TurnAction::Mortgages => "Mortgages",
-        TurnAction::EndTurn => "End Turn",
-    }
-}
-
-/// Hotkey for an action, usable inside or outside the menu.
-fn action_hotkey(action: TurnAction) -> char {
-    match action {
-        TurnAction::RollDice => 'r',
-        TurnAction::BuyProperty => 'b',
-        TurnAction::Trade => 't',
-        TurnAction::ViewInventory => 'i',
-        TurnAction::Mortgages => 'g',
-        TurnAction::EndTurn => 'e',
-    }
-}
-
-fn action_for_hotkey(c: char) -> Option<TurnAction> {
-    ACTIONS.into_iter().find(|&a| action_hotkey(a) == c)
-}
-
-pub struct ActionMenu {
-    selected: usize,
-}
-
-impl ActionMenu {
-    fn new() -> Self {
-        Self { selected: 0 }
-    }
-
-    fn prev(&mut self) {
-        self.selected = self.selected.saturating_sub(1);
-    }
-
-    fn next(&mut self) {
-        self.selected = (self.selected + 1).min(ACTIONS.len() - 1);
-    }
-
-    fn selected(&self) -> TurnAction {
-        ACTIONS[self.selected]
-    }
-
-    fn render(&self, frame: &mut Frame, current: usize, money: u32) {
-        // A blank row separates "End Turn" (the last action) from the rest.
-        let gap = 1u16;
-        let area = centered_rect(frame.area(), 28, ACTIONS.len() as u16 + gap + 2);
-        let block = Block::bordered()
-            .title_top(Line::from(format!(" Player {} — ${money} ", current + 1)).centered())
-            .style(Style::new().bg(Color::Black).fg(Color::White).bold());
-        let inner = block.inner(area);
-        frame.render_widget(Clear, area);
-        frame.render_widget(block, area);
-
-        let last = ACTIONS.len() - 1;
-        let mut lines: Vec<Line> = Vec::new();
-        for (i, &action) in ACTIONS.iter().enumerate() {
-            if i == last {
-                lines.push(Line::from("")); // gap before End Turn
-            }
-            let label = format!("{} ({})", action_label(action), action_hotkey(action));
-            let line = Line::from(label).centered();
-            lines.push(if i == self.selected { line.reversed() } else { line });
-        }
-        frame.render_widget(Paragraph::new(lines), inner);
-    }
-}
-

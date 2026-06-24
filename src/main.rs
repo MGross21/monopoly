@@ -10,22 +10,18 @@ use std::io::stdout;
 use std::time::{Duration, Instant};
 
 mod board;
-mod dice;
 mod game;
-mod map;
-mod menu;
 mod player;
-mod setup;
 mod space;
 mod ui;
 
 use crate::board::board;
 use crate::game::Game;
-use crate::map::{BOARD_BG, BOARD_H, BOARD_W, Map, Overlay, render_warning};
-use crate::menu::{Menu, MenuAction};
 use crate::player::Player;
-use crate::setup::Setup;
-use crate::ui::Confirm;
+use crate::ui::map::{BOARD_BG, BOARD_H, BOARD_W, Map, Overlay, render_warning};
+use crate::ui::menu::{Menu, MenuAction};
+use crate::ui::setup::Setup;
+use crate::ui::{Confirm, ConfirmResult};
 
 /// How often to wake while a game has live animation/notifications.
 const TICK: Duration = Duration::from_millis(33);
@@ -52,7 +48,7 @@ fn main() -> Result<()> {
     // Decode the dice GIF off-thread while the user is in the menu, so neither
     // starting a game nor the first roll stutters.
     std::thread::spawn(|| {
-        let _ = dice::animation();
+        let _ = crate::ui::dice::animation();
     });
     // `init` enables raw mode + alternate screen so key presses register and
     // the board draws on its own screen; `restore` undoes it on the way out.
@@ -102,21 +98,11 @@ fn run(terminal: &mut DefaultTerminal) -> Result<()> {
         }
 
         // Quit confirmation: q or Ctrl-C opens a Yes/No prompt.
-        if quit.is_some() {
-            match key.code {
-                KeyCode::Up | KeyCode::Down | KeyCode::Left | KeyCode::Right => {
-                    if let Some(c) = quit.as_mut() {
-                        c.toggle();
-                    }
-                }
-                KeyCode::Enter => {
-                    if quit.as_ref().is_some_and(Confirm::is_yes) {
-                        break;
-                    }
-                    quit = None;
-                }
-                KeyCode::Esc => quit = None,
-                _ => {}
+        if let Some(confirm) = quit.as_mut() {
+            match confirm.handle_key(key.code) {
+                ConfirmResult::Pending => {}
+                ConfirmResult::Yes => break,
+                ConfirmResult::No => quit = None,
             }
             continue;
         }
@@ -168,10 +154,20 @@ fn render(frame: &mut Frame, app: &mut App, quit: Option<&Confirm>) {
     // Green table fills the whole screen, behind and around the board.
     frame.render_widget(Block::new().style(Style::new().bg(BOARD_BG)), area);
 
+    // `Map` borrows the board/players. The in-game screen lends its own; the
+    // menu/setup screens have no players and lend a throwaway board built here.
+    let empty: Vec<Player> = Vec::new();
+    let board_owned; // only initialized for the menu/setup screens
     let (spaces, players, overlay) = match &*app {
-        App::Menu(m) => (board(), Vec::new(), Overlay::Menu { selected: m.selected }),
-        App::Setup(_) => (board(), Vec::new(), Overlay::Board { turn: 0, breath: 0.0 }),
-        App::Playing(g) => (g.board.clone(), g.players.clone(), g.overlay()),
+        App::Menu(m) => {
+            board_owned = board();
+            (board_owned.as_slice(), empty.as_slice(), Overlay::Menu { selected: m.cursor.selected })
+        }
+        App::Setup(_) => {
+            board_owned = board();
+            (board_owned.as_slice(), empty.as_slice(), Overlay::Board { turn: 0, breath: 0.0 })
+        }
+        App::Playing(g) => (g.board.as_slice(), g.players.as_slice(), g.overlay()),
     };
     frame.render_widget(Map::new(spaces, players, overlay), area);
 

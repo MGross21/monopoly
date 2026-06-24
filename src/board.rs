@@ -2,11 +2,17 @@
 //!
 //! Index 0 = GO, index 39 = Boardwalk.
 
-use crate::space::{ColorGroup, Property, Railroad, Space, Utility};
+use crate::space::{ColorGroup, Space};
+
+const RAILROAD_PRICE: u32 = 200;
+const UTILITY_PRICE: u32 = 150;
 
 /// The 40 spaces in order, index 0 = GO.
 pub fn board() -> Vec<Space> {
     use ColorGroup::*;
+    let street = Space::street;
+    let railroad = |name| Space::railroad(name, RAILROAD_PRICE);
+    let utility = |name| Space::utility(name, UTILITY_PRICE);
     vec![
         Space::Go,
         street("Mediterranean Ave", Brown, 60, 2),
@@ -49,32 +55,4 @@ pub fn board() -> Vec<Space> {
         Space::Tax(100),
         street("Boardwalk", DarkBlue, 400, 50),
     ]
-}
-
-// Constructors keeping the board list above readable.
-
-fn street(name: &str, group: ColorGroup, price: u32, rent: u32) -> Space {
-    Space::Property(Property {
-        name: name.to_string(),
-        group,
-        price,
-        rent,
-        owner: None,
-    })
-}
-
-fn railroad(name: &str) -> Space {
-    Space::Railroad(Railroad {
-        name: name.to_string(),
-        price: 200,
-        owner: None,
-    })
-}
-
-fn utility(name: &str) -> Space {
-    Space::Utility(Utility {
-        name: name.to_string(),
-        price: 150,
-        owner: None,
-    })
 }

@@ -2,6 +2,8 @@
 
 use crossterm::event::KeyCode;
 
+use crate::ui::Cursor;
+
 /// Menu entries, in display order.
 pub const OPTIONS: [&str; 1] = ["Start New Game"];
 
@@ -13,20 +15,22 @@ pub enum MenuAction {
 }
 
 pub struct Menu {
-    pub selected: usize,
+    pub cursor: Cursor,
 }
 
 impl Menu {
     pub fn new() -> Self {
-        Self { selected: 0 }
+        Self {
+            cursor: Cursor::new(OPTIONS.len()),
+        }
     }
 
     pub fn handle_key(&mut self, key: KeyCode) -> MenuAction {
         match key {
-            KeyCode::Up => self.selected = self.selected.saturating_sub(1),
-            KeyCode::Down => self.selected = (self.selected + 1).min(OPTIONS.len() - 1),
+            KeyCode::Up => self.cursor.up(),
+            KeyCode::Down => self.cursor.down(),
             KeyCode::Enter => {
-                if OPTIONS[self.selected] == "Start New Game" {
+                if OPTIONS[self.cursor.selected] == "Start New Game" {
                     return MenuAction::NewGame;
                 }
             }

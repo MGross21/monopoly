@@ -12,7 +12,7 @@ use ratatui::{
 };
 
 use crate::player::{Piece, Player};
-use crate::ui::centered_rect;
+use crate::ui::{Cursor, centered_rect};
 
 const MIN_PLAYERS: usize = 2;
 const MAX_PLAYERS: usize = 8;
@@ -24,7 +24,7 @@ pub struct Setup {
     player_count: usize,
     starting_money: u32,
     pieces: Vec<Piece>,
-    selected: usize, // 0 = players, 1 = money, 2.. = piece per player
+    cursor: Cursor, // 0 = players, 1 = money, 2.. = piece per player
 }
 
 impl Setup {
@@ -34,7 +34,7 @@ impl Setup {
             player_count,
             starting_money: 1500,
             pieces: default_pieces(player_count),
-            selected: 0,
+            cursor: Cursor::new(2 + player_count),
         }
     }
 
@@ -45,8 +45,8 @@ impl Setup {
     /// Returns `Some(players)` once the user confirms with Enter.
     pub fn handle_key(&mut self, key: KeyCode) -> Option<Vec<Player>> {
         match key {
-            KeyCode::Up => self.selected = self.selected.saturating_sub(1),
-            KeyCode::Down => self.selected = (self.selected + 1).min(self.field_count() - 1),
+            KeyCode::Up => self.cursor.up(),
+            KeyCode::Down => self.cursor.down(),
             KeyCode::Left => self.adjust(-1),
             KeyCode::Right => self.adjust(1),
             KeyCode::Enter => return Some(self.build_players()),
@@ -56,7 +56,7 @@ impl Setup {
     }
 
     fn adjust(&mut self, dir: i32) {
-        match self.selected {
+        match self.cursor.selected {
             0 => {
                 let count = (self.player_count as i32 + dir)
                     .clamp(MIN_PLAYERS as i32, MAX_PLAYERS as i32) as usize;
@@ -100,7 +100,7 @@ impl Setup {
     fn set_player_count(&mut self, count: usize) {
         self.player_count = count;
         self.pieces = default_pieces(count);
-        self.selected = self.selected.min(self.field_count() - 1);
+        self.cursor.set_len(self.field_count());
     }
 
     fn build_players(&self) -> Vec<Player> {
@@ -140,7 +140,7 @@ impl Setup {
 
     fn field_line(&self, field: usize, label: &str, value: String) -> Line<'static> {
         let line = Line::from(format!("{label:<9} ‹ {value} ›"));
-        if field == self.selected {
+        if field == self.cursor.selected {
             line.reversed()
         } else {
             line
@@ -149,5 +149,5 @@ impl Setup {
 }
 
 fn default_pieces(count: usize) -> Vec<Piece> {
-    Piece::ALL.into_iter().take(count).collect()
+    Piece::all().take(count).collect()
 }

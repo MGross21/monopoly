@@ -1,13 +1,10 @@
 //! Board space data types, no rendering here.
-//!
-//! `allow(dead_code)` covers fields not yet read (e.g. `rent`) until game logic
-//! lands.
-#![allow(dead_code)]
 
 use ratatui::style::Color;
+use serde::{Deserialize, Serialize};
 
 /// The eight color groups for street properties.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ColorGroup {
     Brown,
     LightBlue,
@@ -35,39 +32,40 @@ impl ColorGroup {
     }
 }
 
+/// Fields shared by every buyable space: a name, a purchase price, and an
+/// optional owner (`None` = bank, `Some(i)` = player `i`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Ownable {
+    pub name: String,
+    pub price: u32,
+    pub owner: Option<usize>,
+}
+
+impl Ownable {
+    fn new(name: &str, price: u32) -> Self {
+        Self {
+            name: name.to_string(),
+            price,
+            owner: None,
+        }
+    }
+}
+
 /// A street you can buy, build on, and charge rent for.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Property {
-    pub name: String,
+    pub base: Ownable,
     pub group: ColorGroup,
-    pub price: u32,
     pub rent: u32, // base rent, no houses
-    pub owner: Option<usize>, // None = bank, Some(i) = player i
-}
-
-/// One of the four railroads.
-#[derive(Debug, Clone)]
-pub struct Railroad {
-    pub name: String,
-    pub price: u32,
-    pub owner: Option<usize>,
-}
-
-/// Electric Company or Water Works.
-#[derive(Debug, Clone)]
-pub struct Utility {
-    pub name: String,
-    pub price: u32,
-    pub owner: Option<usize>,
 }
 
 /// Every square is exactly one of these; each variant carries only its own data.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Space {
     Go,
     Property(Property),
-    Railroad(Railroad),
-    Utility(Utility),
+    Railroad(Ownable),
+    Utility(Ownable),
     Tax(u32), // amount owed
     Chance,
     CommunityChest,
@@ -77,56 +75,71 @@ pub enum Space {
 }
 
 impl Space {
+    pub fn street(name: &str, group: ColorGroup, price: u32, rent: u32) -> Self {
+        Space::Property(Property {
+            base: Ownable::new(name, price),
+            group,
+            rent,
+        })
+    }
+
+    pub fn railroad(name: &str, price: u32) -> Self {
+        Space::Railroad(Ownable::new(name, price))
+    }
+
+    pub fn utility(name: &str, price: u32) -> Self {
+        Space::Utility(Ownable::new(name, price))
+    }
+
+    /// The shared ownable data (name/price/owner) for buyable spaces.
+    fn ownable(&self) -> Option<&Ownable> {
+        match self {
+            Space::Property(p) => Some(&p.base),
+            Space::Railroad(o) | Space::Utility(o) => Some(o),
+            _ => None,
+        }
+    }
+
+    fn ownable_mut(&mut self) -> Option<&mut Ownable> {
+        match self {
+            Space::Property(p) => Some(&mut p.base),
+            Space::Railroad(o) | Space::Utility(o) => Some(o),
+            _ => None,
+        }
+    }
+
     /// Short label for the board cell.
     pub fn name(&self) -> &str {
         match self {
             Space::Go => "GO",
-            Space::Property(p) => &p.name,
-            Space::Railroad(r) => &r.name,
-            Space::Utility(u) => &u.name,
             Space::Tax(_) => "Tax",
             Space::Chance => "Chance",
             Space::CommunityChest => "Comm Chest",
             Space::Jail => "Jail",
             Space::FreeParking => "Free Parking",
             Space::GoToJail => "Go To Jail",
+            _ => &self.ownable().unwrap().name,
         }
     }
 
     /// Can this space be bought (street, railroad, utility)?
     pub fn is_ownable(&self) -> bool {
-        matches!(
-            self,
-            Space::Property(_) | Space::Railroad(_) | Space::Utility(_)
-        )
+        self.ownable().is_some()
     }
 
     /// Printed purchase price, if any.
     pub fn price(&self) -> Option<u32> {
-        match self {
-            Space::Property(p) => Some(p.price),
-            Space::Railroad(r) => Some(r.price),
-            Space::Utility(u) => Some(u.price),
-            _ => None,
-        }
+        self.ownable().map(|o| o.price)
     }
 
     /// Current owner's player index, if owned.
     pub fn owner(&self) -> Option<usize> {
-        match self {
-            Space::Property(p) => p.owner,
-            Space::Railroad(r) => r.owner,
-            Space::Utility(u) => u.owner,
-            _ => None,
-        }
+        self.ownable().and_then(|o| o.owner)
     }
 
     pub fn set_owner(&mut self, who: Option<usize>) {
-        match self {
-            Space::Property(p) => p.owner = who,
-            Space::Railroad(r) => r.owner = who,
-            Space::Utility(u) => u.owner = who,
-            _ => {}
+        if let Some(o) = self.ownable_mut() {
+            o.owner = who;
         }
     }
 

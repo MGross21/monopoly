@@ -1,8 +1,13 @@
 //! Players and their board tokens.
-#![allow(dead_code)] // money/position read once game logic lands
+
+use serde::{Deserialize, Serialize};
+use strum::{EnumCount, EnumIter, FromRepr, IntoEnumIterator};
 
 /// The eight classic tokens.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, EnumIter, EnumCount, FromRepr,
+)]
+#[repr(usize)]
 pub enum Piece {
     TopHat,
     Car,
@@ -15,16 +20,10 @@ pub enum Piece {
 }
 
 impl Piece {
-    pub const ALL: [Piece; 8] = [
-        Piece::TopHat,
-        Piece::Car,
-        Piece::Dog,
-        Piece::Cat,
-        Piece::Ship,
-        Piece::Boot,
-        Piece::Thimble,
-        Piece::Wheelbarrow,
-    ];
+    /// Every piece, in declaration order.
+    pub fn all() -> impl Iterator<Item = Piece> {
+        Piece::iter()
+    }
 
     /// Token glyph. Emoji so it works without a patched font; centralized here
     /// so you can swap to Nerd Font codepoints in one place.
@@ -54,20 +53,16 @@ impl Piece {
         }
     }
 
-    fn index(self) -> usize {
-        Self::ALL.iter().position(|&p| p == self).unwrap()
-    }
-
     pub fn next(self) -> Self {
-        Self::ALL[(self.index() + 1) % Self::ALL.len()]
+        Self::from_repr((self as usize + 1) % Self::COUNT).unwrap()
     }
 
     pub fn prev(self) -> Self {
-        Self::ALL[(self.index() + Self::ALL.len() - 1) % Self::ALL.len()]
+        Self::from_repr((self as usize + Self::COUNT - 1) % Self::COUNT).unwrap()
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Player {
     pub piece: Piece,
     pub money: u32,

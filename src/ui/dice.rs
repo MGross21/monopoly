@@ -28,13 +28,13 @@ const FRAME_TIME: Duration = Duration::from_millis(40);
 /// The dice GIF, decoded once and cached (decoding is slow).
 pub fn animation() -> &'static Animation {
     static ANIM: OnceLock<Animation> = OnceLock::new();
-    ANIM.get_or_init(|| Animation::load(include_bytes!("../assets/dice.gif")))
+    ANIM.get_or_init(|| Animation::load(include_bytes!("../../assets/dice.gif")))
 }
 
 /// The card-draw GIF (Chance / Community Chest), decoded once and cached.
 pub fn card_animation() -> &'static Animation {
     static ANIM: OnceLock<Animation> = OnceLock::new();
-    ANIM.get_or_init(|| Animation::load(include_bytes!("../assets/moving_card.gif")))
+    ANIM.get_or_init(|| Animation::load(include_bytes!("../../assets/moving_card.gif")))
 }
 
 /// A GIF decoded into colored ASCII frames.
