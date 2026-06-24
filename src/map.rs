@@ -104,7 +104,11 @@ impl Widget for Map {
                     Some((pos, breath)) if pos == index => breathe(breath),
                     _ => BOARD_BG,
                 };
-                render_space(&self.board[index], cell, bg, buf);
+                let owner_icon = self.board[index]
+                    .owner()
+                    .and_then(|o| self.players.get(o))
+                    .map(|p| p.piece.icon());
+                render_space(&self.board[index], cell, bg, owner_icon, buf);
                 self.render_tokens(index, cell, buf);
             }
         }
@@ -333,12 +337,12 @@ fn ring_index(r: usize, c: usize, rows: usize, cols: usize) -> Option<usize> {
 
 /// Bordered cell: name on top, price/owner on the bottom, border tinted by
 /// color group for properties.
-fn render_space(space: &Space, area: Rect, bg: Color, buf: &mut Buffer) {
+fn render_space(space: &Space, area: Rect, bg: Color, owner_icon: Option<&str>, buf: &mut Buffer) {
     let mut block = Block::bordered()
         .style(Style::new().bg(bg).fg(Color::Black).bold())
         .title_top(Line::from(short_name(space, area.width)).centered());
 
-    let detail = detail_line(space);
+    let detail = detail_line(space, owner_icon);
     if !detail.is_empty() {
         block = block.title_bottom(Line::from(detail).centered());
     }
@@ -371,21 +375,21 @@ fn short_name(space: &Space, cell_width: u16) -> String {
     space.name().chars().take(max).collect()
 }
 
-/// Owner if bought, else price, else blank.
-fn detail_line(space: &Space) -> String {
+/// Owner (with their token) if bought, else price, else blank.
+fn detail_line(space: &Space, owner_icon: Option<&str>) -> String {
     match space {
-        Space::Property(p) => owned_or_price(p.owner, p.price),
-        Space::Railroad(r) => owned_or_price(r.owner, r.price),
-        Space::Utility(u) => owned_or_price(u.owner, u.price),
+        Space::Property(p) => owned_or_price(p.owner, p.price, owner_icon),
+        Space::Railroad(r) => owned_or_price(r.owner, r.price, owner_icon),
+        Space::Utility(u) => owned_or_price(u.owner, u.price, owner_icon),
         Space::Tax(amount) => format!("-${amount}"),
         _ => String::new(),
     }
 }
 
-/// "P1" if owned, otherwise the price like "$200".
-fn owned_or_price(owner: Option<usize>, price: u32) -> String {
+/// "P1 🎩" if owned, otherwise the price like "$200".
+fn owned_or_price(owner: Option<usize>, price: u32, icon: Option<&str>) -> String {
     match owner {
-        Some(player) => format!("P{}", player + 1),
+        Some(player) => format!("P{} {}", player + 1, icon.unwrap_or("")),
         None => format!("${price}"),
     }
 }

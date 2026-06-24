@@ -8,7 +8,7 @@ use ratatui::{
     Frame,
     style::{Color, Style, Stylize},
     text::Line,
-    widgets::{Block, Clear, Paragraph},
+    widgets::{Block, BorderType, Clear, Padding, Paragraph},
 };
 use ratatui_notifications::{
     Anchor, Animation as ToastAnimation, AutoDismiss, Level, Notification, Notifications,
@@ -34,6 +34,7 @@ pub struct Game {
     pub menu: Option<ActionMenu>,
     card: Option<CardDraw>,
     confirm_end: Option<Confirm>,
+    info: Option<InfoBox>,
     notes: Notifications,
     doubles: u8,
     can_roll: bool,
@@ -47,6 +48,12 @@ struct CardDraw {
     title: &'static str,
 }
 
+/// A centered info popup (e.g. owned-property list) dismissed with any key.
+struct InfoBox {
+    title: String,
+    lines: Vec<String>,
+}
+
 impl Game {
     pub fn new(players: Vec<Player>) -> Self {
         let mut game = Self {
@@ -57,6 +64,7 @@ impl Game {
             menu: None,
             card: None,
             confirm_end: None,
+            info: None,
             // Cap how many toasts stack at once so a single turn's events don't
             // pile up and flicker.
             notes: Notifications::new().max_concurrent(Some(4)),
@@ -116,6 +124,12 @@ impl Game {
     // --- input ---------------------------------------------------------------
 
     pub fn handle_key(&mut self, key: KeyCode) {
+        // An info popup blocks everything; any key dismisses it.
+        if self.info.is_some() {
+            self.info = None;
+            return;
+        }
+
         // End-turn confirmation takes priority.
         if self.confirm_end.is_some() {
             match key {
@@ -171,6 +185,12 @@ impl Game {
         match key {
             KeyCode::Char('m') | KeyCode::Enter => self.menu = Some(ActionMenu::new()),
             KeyCode::Char(' ') => self.start_roll(),
+            // Action hotkeys work outside the menu for faster turns.
+            KeyCode::Char(c) => {
+                if let Some(action) = action_for_hotkey(c) {
+                    self.run(action);
+                }
+            }
             _ => {}
         }
     }
@@ -308,18 +328,19 @@ impl Game {
 
     fn show_inventory(&mut self) {
         let me = self.current;
-        let owned: Vec<String> = self
+        let lines: Vec<String> = self
             .board
             .iter()
             .filter(|s| s.owner() == Some(me))
-            .map(|s| s.name().to_string())
+            .map(|s| match s.price() {
+                Some(price) => format!("{}  (${price})", s.name()),
+                None => s.name().to_string(),
+            })
             .collect();
-        let msg = if owned.is_empty() {
-            format!("Player {} owns nothing yet", me + 1)
-        } else {
-            format!("Player {} owns: {}", me + 1, owned.join(", "))
-        };
-        self.notify(msg, Level::Info);
+        self.info = Some(InfoBox {
+            title: format!(" Player {} — ${} ", me + 1, self.players[me].money),
+            lines,
+        });
     }
 
     // --- money & helpers -----------------------------------------------------
@@ -372,12 +393,24 @@ impl Game {
     }
 
     fn notify(&mut self, message: impl Into<String>, level: Level) {
+        let (accent, tag) = match level {
+            Level::Warn => (Color::Rgb(0xF7, 0x94, 0x1D), "warn"),
+            Level::Error => (Color::Rgb(0xED, 0x1B, 0x24), "error"),
+            _ => (Color::Rgb(0x6C, 0xB6, 0xFF), "info"),
+        };
         if let Ok(note) = Notification::new(message.into())
             .level(level)
             .anchor(Anchor::TopRight)
             .animation(ToastAnimation::Fade) // fade is far less glitchy than slide
-            .style(Style::new().bg(Color::Black).fg(Color::White))
-            .max_size(SizeConstraint::Absolute(38), SizeConstraint::Absolute(3))
+            .border_type(BorderType::Rounded)
+            .border_style(Style::new().fg(accent))
+            .title(Line::from(format!(" {tag} ")))
+            .title_style(Style::new().fg(accent).bold())
+            .style(Style::new().bg(Color::Rgb(0x16, 0x16, 0x1C)).fg(Color::White))
+            .padding(Padding::horizontal(1))
+            .margin(1)
+            // Fixed height keeps stacking spacing uniform between all toasts.
+            .max_size(SizeConstraint::Absolute(46), SizeConstraint::Absolute(3))
             .auto_dismiss(AutoDismiss::After(Duration::from_secs(3)))
             .build()
         {
@@ -395,10 +428,13 @@ impl Game {
             dice::render_clip(frame, dice::card_animation(), &card.clip, card.title);
         }
         if let Some(menu) = &self.menu {
-            menu.render(frame, self.current);
+            menu.render(frame, self.current, self.players[self.current].money);
         }
         if let Some(confirm) = &self.confirm_end {
             confirm.render(frame, " End your turn? ");
+        }
+        if let Some(info) = &self.info {
+            crate::ui::info_popup(frame, &info.title, &info.lines);
         }
         let area = frame.area();
         self.notes.render(frame, area);
@@ -442,6 +478,22 @@ fn action_label(action: TurnAction) -> &'static str {
     }
 }
 
+/// Hotkey for an action, usable inside or outside the menu.
+fn action_hotkey(action: TurnAction) -> char {
+    match action {
+        TurnAction::RollDice => 'r',
+        TurnAction::BuyProperty => 'b',
+        TurnAction::Trade => 't',
+        TurnAction::ViewInventory => 'i',
+        TurnAction::Mortgages => 'g',
+        TurnAction::EndTurn => 'e',
+    }
+}
+
+fn action_for_hotkey(c: char) -> Option<TurnAction> {
+    ACTIONS.into_iter().find(|&a| action_hotkey(a) == c)
+}
+
 pub struct ActionMenu {
     selected: usize,
 }
@@ -463,12 +515,12 @@ impl ActionMenu {
         ACTIONS[self.selected]
     }
 
-    fn render(&self, frame: &mut Frame, current: usize) {
+    fn render(&self, frame: &mut Frame, current: usize, money: u32) {
         // A blank row separates "End Turn" (the last action) from the rest.
         let gap = 1u16;
-        let area = centered_rect(frame.area(), 26, ACTIONS.len() as u16 + gap + 2);
+        let area = centered_rect(frame.area(), 28, ACTIONS.len() as u16 + gap + 2);
         let block = Block::bordered()
-            .title_top(Line::from(format!(" Player {} ", current + 1)).centered())
+            .title_top(Line::from(format!(" Player {} — ${money} ", current + 1)).centered())
             .style(Style::new().bg(Color::Black).fg(Color::White).bold());
         let inner = block.inner(area);
         frame.render_widget(Clear, area);
@@ -480,7 +532,8 @@ impl ActionMenu {
             if i == last {
                 lines.push(Line::from("")); // gap before End Turn
             }
-            let line = Line::from(action_label(action)).centered();
+            let label = format!("{} ({})", action_label(action), action_hotkey(action));
+            let line = Line::from(label).centered();
             lines.push(if i == self.selected { line.reversed() } else { line });
         }
         frame.render_widget(Paragraph::new(lines), inner);

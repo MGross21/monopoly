@@ -42,6 +42,27 @@ impl Confirm {
     }
 }
 
+/// Centered info popup listing static `lines` (no selection). For lists too
+/// large for a toast (e.g. owned properties).
+pub fn info_popup(frame: &mut Frame, title: &str, lines: &[String]) {
+    let width = 48;
+    let height = (lines.len() as u16 + 2).clamp(3, frame.area().height);
+    let area = centered_rect(frame.area(), width, height);
+    let block = Block::bordered()
+        .title_top(Line::from(title).centered())
+        .style(Style::new().bg(Color::Black).fg(Color::White).bold());
+    let inner = block.inner(area);
+    frame.render_widget(Clear, area);
+    frame.render_widget(block, area);
+
+    let body: Vec<Line> = if lines.is_empty() {
+        vec![Line::from("(empty)").centered()]
+    } else {
+        lines.iter().map(|l| Line::from(format!("  {l}"))).collect()
+    };
+    frame.render_widget(Paragraph::new(body), inner);
+}
+
 /// Centered black popup listing `options` with `selected` highlighted.
 pub fn choice_popup(frame: &mut Frame, title: &str, options: &[&str], selected: usize) {
     let area = centered_rect(frame.area(), 28, options.len() as u16 + 2);
