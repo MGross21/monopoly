@@ -248,6 +248,15 @@ impl Game {
         self.done
     }
 
+    /// Whether anything time-driven is happening — a playing animation or a live
+    /// notification. When false, the event loop can block on input instead of
+    /// polling (the breathing highlight simply pauses until the next key).
+    pub fn needs_tick(&self) -> bool {
+        self.notes.has_notification()
+            || matches!(&self.modal, Modal::Card(_))
+            || matches!(&self.modal, Modal::Roll(roll) if roll.animating())
+    }
+
     /// Build a game from saved state, with fresh transient UI and reshuffled
     /// decks.
     fn from_save(save: Save) -> Self {

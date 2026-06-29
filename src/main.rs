@@ -70,10 +70,11 @@ fn run(terminal: &mut DefaultTerminal) -> Result<()> {
     loop {
         terminal.draw(|frame| render(frame, &mut app, quit.as_ref()))?;
 
-        // Keep ticking while playing (the highlight breathes); otherwise block
-        // until the next key so we don't spin.
+        // Poll only while something time-driven is live (an animation or a
+        // notification); otherwise block until the next key so we don't spin at
+        // 30fps on a static board.
         let timeout = match &app {
-            App::Playing(_) => Some(TICK),
+            App::Playing(g) if g.needs_tick() => Some(TICK),
             _ => None,
         };
         let event = match timeout {
