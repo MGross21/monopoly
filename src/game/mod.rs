@@ -62,7 +62,44 @@ enum Modal {
     Info(InfoBox),
     Jail(JailMenu),
     Estate(EstateMenu),
+    Buy { confirm: Confirm, pos: usize },
+    Auction(Auction),
+    Trade(Trade),
     GameOver(usize), // winning player index
+}
+
+const TRADE_STEP: u32 = 10;
+
+/// Which step of building a trade we're on.
+#[derive(Clone, Copy, PartialEq)]
+enum TradeStage {
+    Partner,  // choosing who to trade with
+    Property, // choosing which property changes hands
+    Price,    // setting the cash that moves the other way
+}
+
+/// A one-property-for-cash trade between the current player and a partner. The
+/// property's current owner sells; the other side buys for `price`.
+struct Trade {
+    stage: TradeStage,
+    partners: Vec<usize>,
+    pcursor: Cursor,
+    partner: usize,
+    props: Vec<usize>,
+    prop_cursor: Cursor,
+    price: u32,
+}
+
+const AUCTION_STEP: u32 = 10;
+
+/// A bank auction for one property: players still in `active` take turns to bid
+/// up by `AUCTION_STEP` or pass; the last standing high bidder wins.
+struct Auction {
+    pos: usize,
+    active: Vec<usize>, // players still bidding, in seating order
+    turn: usize,        // index into `active`
+    high_bid: u32,
+    high_bidder: Option<usize>,
 }
 
 /// Whether the estate popup is mortgaging or building.
@@ -299,6 +336,41 @@ impl Game {
                 _ => {}
             },
 
+            // Buy-or-auction prompt for the property just landed on.
+            Modal::Buy { confirm, pos } => {
+                let pos = *pos;
+                match confirm.handle_key(key) {
+                    ConfirmResult::Pending => {}
+                    ConfirmResult::Yes => {
+                        self.modal = Modal::None;
+                        self.buy_current();
+                    }
+                    ConfirmResult::No => {
+                        self.modal = Modal::None;
+                        self.start_auction(pos);
+                    }
+                }
+            }
+
+            // Auction bidding. Take the auction out so the bid/pass handlers get
+            // full access to `self`; put it back unless the auction has ended.
+            Modal::Auction(_) => {
+                if let Modal::Auction(mut auc) = std::mem::replace(&mut self.modal, Modal::None)
+                    && self.auction_input(&mut auc, key)
+                {
+                    self.modal = Modal::Auction(auc);
+                }
+            }
+
+            // Trade builder; same take-out-and-replace pattern as the auction.
+            Modal::Trade(_) => {
+                if let Modal::Trade(mut t) = std::mem::replace(&mut self.modal, Modal::None)
+                    && self.trade_input(&mut t, key)
+                {
+                    self.modal = Modal::Trade(t);
+                }
+            }
+
             // A card animation blocks input; Space/Enter skips straight to the
             // card's effect.
             Modal::Card(card) => {
@@ -343,7 +415,7 @@ impl Game {
             }
             TurnAction::BuildHouses => self.open_build(),
             TurnAction::ViewInventory => self.show_inventory(),
-            TurnAction::Trade => self.notify("Trading is not implemented yet", Level::Warn),
+            TurnAction::Trade => self.open_trade(),
             TurnAction::Mortgages => self.open_mortgages(),
         }
     }
@@ -442,7 +514,12 @@ impl Game {
             Space::Chance => self.draw_card(Deck::Chance),
             Space::CommunityChest => self.draw_card(Deck::Chest),
             space if space.is_ownable() => match space.owner() {
-                None => self.notify("Unowned — open the menu to buy it", Level::Info),
+                None => {
+                    // Offer to buy; declining sends the property to auction.
+                    let price = space.price().unwrap_or(0);
+                    self.notify(format!("{} is for sale (${price})", space.name()), Level::Info);
+                    self.modal = Modal::Buy { confirm: Confirm::new(), pos };
+                }
                 Some(owner) if owner != self.current => {
                     let rent = self.rent(pos, owner, total);
                     self.pay_player(owner, rent);
@@ -798,6 +875,179 @@ impl Game {
         total > 0 && mine == total
     }
 
+    // --- auctions ------------------------------------------------------------
+
+    /// Put `pos` up for auction among all players still in the game.
+    fn start_auction(&mut self, pos: usize) {
+        let active: Vec<usize> =
+            (0..self.players.len()).filter(|&i| !self.players[i].bankrupt).collect();
+        if active.is_empty() {
+            return;
+        }
+        let name = self.board[pos].name().to_string();
+        self.notify(format!("{name} goes to auction"), Level::Info);
+        self.modal = Modal::Auction(Auction { pos, active, turn: 0, high_bid: 0, high_bidder: None });
+    }
+
+    /// Handle one auction key press. Returns `true` to keep the auction open.
+    fn auction_input(&mut self, auc: &mut Auction, key: KeyCode) -> bool {
+        match key {
+            KeyCode::Char('b') => self.auction_bid(auc),
+            KeyCode::Char('p') => self.auction_pass(auc),
+            KeyCode::Esc => {
+                self.notify("Auction cancelled", Level::Warn);
+                false
+            }
+            _ => true,
+        }
+    }
+
+    fn auction_bid(&mut self, auc: &mut Auction) -> bool {
+        let cur = auc.active[auc.turn];
+        let next = auc.high_bid + AUCTION_STEP;
+        if self.players[cur].money < next {
+            self.notify(format!("Player {} can't afford ${next}", cur + 1), Level::Warn);
+            return true;
+        }
+        auc.high_bid = next;
+        auc.high_bidder = Some(cur);
+        self.notify(format!("Player {} bids ${next}", cur + 1), Level::Info);
+        // A lone remaining bidder wins immediately.
+        if auc.active.len() == 1 {
+            self.finish_auction(auc);
+            return false;
+        }
+        auc.turn = (auc.turn + 1) % auc.active.len();
+        true
+    }
+
+    fn auction_pass(&mut self, auc: &mut Auction) -> bool {
+        let cur = auc.active[auc.turn];
+        self.notify(format!("Player {} passes", cur + 1), Level::Info);
+        auc.active.remove(auc.turn);
+        if auc.active.is_empty() {
+            self.notify("No bids — the property stays with the bank", Level::Warn);
+            return false;
+        }
+        if auc.turn >= auc.active.len() {
+            auc.turn = 0;
+        }
+        // If only the high bidder is left, they win.
+        if auc.active.len() == 1 && auc.high_bidder == Some(auc.active[0]) {
+            self.finish_auction(auc);
+            return false;
+        }
+        true
+    }
+
+    fn finish_auction(&mut self, auc: &Auction) {
+        if let Some(winner) = auc.high_bidder {
+            self.players[winner].money -= auc.high_bid;
+            self.board[auc.pos].set_owner(Some(winner));
+            let name = self.board[auc.pos].name().to_string();
+            self.notify(format!("Player {} won {name} for ${}", winner + 1, auc.high_bid), Level::Info);
+        }
+    }
+
+    // --- trade ---------------------------------------------------------------
+
+    /// Open the trade builder with the current player. Needs another solvent
+    /// player to trade with.
+    fn open_trade(&mut self) {
+        let me = self.current;
+        let partners: Vec<usize> =
+            (0..self.players.len()).filter(|&i| i != me && !self.players[i].bankrupt).collect();
+        if partners.is_empty() {
+            self.notify("No one to trade with", Level::Warn);
+            return;
+        }
+        let pcursor = Cursor::new(partners.len());
+        let partner = partners[0];
+        self.modal = Modal::Trade(Trade {
+            stage: TradeStage::Partner,
+            partners,
+            pcursor,
+            partner,
+            props: Vec::new(),
+            prop_cursor: Cursor::new(0),
+            price: 0,
+        });
+    }
+
+    /// Properties owned by either `a` or `b`, in board order.
+    fn tradeable(&self, a: usize, b: usize) -> Vec<usize> {
+        (0..self.board.len())
+            .filter(|&i| matches!(self.board[i].owner(), Some(o) if o == a || o == b))
+            .collect()
+    }
+
+    /// Drive the trade builder. Returns `true` to keep the popup open.
+    fn trade_input(&mut self, t: &mut Trade, key: KeyCode) -> bool {
+        match t.stage {
+            TradeStage::Partner => match key {
+                KeyCode::Up => t.pcursor.up(),
+                KeyCode::Down => t.pcursor.down(),
+                KeyCode::Esc => return false,
+                KeyCode::Enter => {
+                    t.partner = t.partners[t.pcursor.selected];
+                    t.props = self.tradeable(self.current, t.partner);
+                    if t.props.is_empty() {
+                        self.notify("Neither of you owns anything to trade", Level::Warn);
+                        return false;
+                    }
+                    t.prop_cursor = Cursor::new(t.props.len());
+                    t.stage = TradeStage::Property;
+                }
+                _ => {}
+            },
+            TradeStage::Property => match key {
+                KeyCode::Up => t.prop_cursor.up(),
+                KeyCode::Down => t.prop_cursor.down(),
+                KeyCode::Esc => t.stage = TradeStage::Partner,
+                KeyCode::Enter => {
+                    let idx = t.props[t.prop_cursor.selected];
+                    t.price = self.board[idx].price().unwrap_or(0); // sensible default
+                    t.stage = TradeStage::Price;
+                }
+                _ => {}
+            },
+            TradeStage::Price => match key {
+                KeyCode::Left | KeyCode::Down => t.price = t.price.saturating_sub(TRADE_STEP),
+                KeyCode::Right | KeyCode::Up => t.price += TRADE_STEP,
+                KeyCode::Esc => t.stage = TradeStage::Property,
+                KeyCode::Enter => return self.execute_trade(t),
+                _ => {}
+            },
+        }
+        true
+    }
+
+    /// Carry out the built trade. Returns `true` to keep the popup open (so the
+    /// player can adjust) when the trade can't go through.
+    fn execute_trade(&mut self, t: &Trade) -> bool {
+        let idx = t.props[t.prop_cursor.selected];
+        if self.board[idx].houses() > 0 {
+            self.notify("Sell the group's houses before trading it", Level::Warn);
+            return true;
+        }
+        // Whoever owns it sells; the other side buys for the cash.
+        let seller = self.board[idx].owner().unwrap();
+        let buyer = if seller == self.current { t.partner } else { self.current };
+        if self.players[buyer].money < t.price {
+            self.notify(format!("Player {} can't afford ${}", buyer + 1, t.price), Level::Warn);
+            return true;
+        }
+        self.players[buyer].money -= t.price;
+        self.players[seller].money += t.price;
+        self.board[idx].set_owner(Some(buyer));
+        let name = self.board[idx].name().to_string();
+        self.notify(
+            format!("Player {} bought {name} from Player {} for ${}", buyer + 1, seller + 1, t.price),
+            Level::Info,
+        );
+        false
+    }
+
     // --- mortgages & building ------------------------------------------------
 
     /// Open the mortgage list for the current player's holdings.
@@ -1019,6 +1269,56 @@ impl Game {
                 let lines = self.estate_labels(menu);
                 choice_popup(frame, title, &lines, menu.cursor.selected);
             }
+            Modal::Buy { confirm, pos } => {
+                let price = self.board[*pos].price().unwrap_or(0);
+                confirm.render(frame, &format!(" Buy {} for ${price}? ", self.board[*pos].name()));
+            }
+            Modal::Auction(auc) => {
+                let cur = auc.active[auc.turn];
+                let high = match auc.high_bidder {
+                    Some(w) => format!("High bid: ${} (Player {})", auc.high_bid, w + 1),
+                    None => "No bids yet".to_string(),
+                };
+                let lines = vec![
+                    format!("Property: {}", self.board[auc.pos].name()),
+                    high,
+                    format!("Player {}'s turn", cur + 1),
+                    format!("[b] bid +${AUCTION_STEP}   [p] pass   [esc] cancel"),
+                ];
+                crate::ui::info_popup(frame, " Auction ", &lines);
+            }
+            Modal::Trade(t) => match t.stage {
+                TradeStage::Partner => {
+                    let labels: Vec<String> = t
+                        .partners
+                        .iter()
+                        .map(|&p| format!("Player {}  (${})", p + 1, self.players[p].money))
+                        .collect();
+                    choice_popup(frame, " Trade — pick a player ", &labels, t.pcursor.selected);
+                }
+                TradeStage::Property => {
+                    let labels: Vec<String> = t
+                        .props
+                        .iter()
+                        .map(|&i| {
+                            let owner = self.board[i].owner().unwrap();
+                            format!("{}  (Player {})", self.board[i].name(), owner + 1)
+                        })
+                        .collect();
+                    choice_popup(frame, " Trade — pick a property ", &labels, t.prop_cursor.selected);
+                }
+                TradeStage::Price => {
+                    let idx = t.props[t.prop_cursor.selected];
+                    let owner = self.board[idx].owner().unwrap();
+                    let buyer = if owner == self.current { t.partner } else { self.current };
+                    let lines = vec![
+                        format!("{} from Player {}", self.board[idx].name(), owner + 1),
+                        format!("Player {} pays ${}", buyer + 1, t.price),
+                        "[←/→] adjust   [enter] confirm   [esc] back".to_string(),
+                    ];
+                    crate::ui::info_popup(frame, " Trade — price ", &lines);
+                }
+            },
             Modal::GameOver(winner) => crate::ui::info_popup(
                 frame,
                 &format!(" Player {} wins! ", winner + 1),
