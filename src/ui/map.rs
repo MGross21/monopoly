@@ -3,9 +3,9 @@
 use ratatui::{
     buffer::Buffer,
     layout::{Alignment, Constraint, Flex, Layout, Rect},
-    style::{Color, Style},
+    style::{Color, Style, Stylize},
     text::Line,
-    widgets::{Block, Paragraph, Widget, Wrap},
+    widgets::{Block, Clear, Paragraph, Widget, Wrap},
 };
 
 use tui_big_text::{BigText, PixelSize};
@@ -120,39 +120,45 @@ impl Widget for Map<'_> {
             board_w - 2 * cell_w,
             board_h - 2 * cell_h,
         );
-        render_center(center, &self.overlay, buf);
+        render_center(center, &self.overlay, self.players, self.board, buf);
     }
 }
 
 impl Map<'_> {
-    /// Draws the tokens of any players standing on `index` along the cell's
-    /// bottom inner row.
+    /// Draws the tokens of any players standing on `index`, wrapped across the
+    /// cell's bottom rows so a crowded space doesn't overflow one line.
     fn render_tokens(&self, index: usize, cell: Rect, buf: &mut Buffer) {
-        let icons = self
+        let icons: Vec<&str> = self
             .players
             .iter()
             .filter(|p| p.position == index)
             .map(|p| p.piece.icon())
-            .collect::<Vec<_>>()
-            .join(" ");
+            .collect();
         if icons.is_empty() {
             return;
         }
-        let row = Rect::new(
-            cell.x + 1,
-            cell.y + cell.height.saturating_sub(2),
-            cell.width.saturating_sub(2),
-            1,
-        );
-        Paragraph::new(Line::from(icons).centered())
-            .style(Style::new().bg(BOARD_BG))
-            .render(row, buf);
+        // Each emoji token takes ~2 columns plus a space; fit as many per row as
+        // the inner width allows, then stack onto rows above.
+        let inner_w = cell.width.saturating_sub(2);
+        let per_row = (inner_w / 3).max(1) as usize;
+        let rows = icons.chunks(per_row);
+        let row_count = rows.len() as u16;
+        // Anchor the block just above the cell's bottom border.
+        let bottom = cell.y + cell.height.saturating_sub(1);
+        let top = bottom.saturating_sub(row_count);
+        for (r, chunk) in rows.enumerate() {
+            let line = chunk.join(" ");
+            let area = Rect::new(cell.x + 1, top + r as u16, inner_w, 1);
+            Paragraph::new(Line::from(line).centered())
+                .style(Style::new().bg(BOARD_BG))
+                .render(area, buf);
+        }
     }
 }
 
 /// Draws the board interior. The main menu shows the title + menu bar; in-game
 /// shows the title, a thin keybind bar, then the two card slots.
-fn render_center(area: Rect, overlay: &Overlay, buf: &mut Buffer) {
+fn render_center(area: Rect, overlay: &Overlay, players: &[Player], board: &[Space], buf: &mut Buffer) {
     // Title is vertically centered in the whole center; menus/cards sit at the
     // bottom (drawn after, and the title only paints its glyph cells anyway).
     render_title(area, buf);
@@ -163,12 +169,20 @@ fn render_center(area: Rect, overlay: &Overlay, buf: &mut Buffer) {
             render_menu_bar(bar, selected, buf);
         }
         Overlay::Board { turn, .. } => {
-            let [_, keys, cards] = Layout::vertical([
+            // A standings panel (height = one row per player + border) sits above
+            // the keybar and card slots. The setup screen has no players, so it
+            // collapses to nothing.
+            let panel_h = if players.is_empty() { 0 } else { players.len() as u16 + 2 };
+            let [_, panel, keys, cards] = Layout::vertical([
                 Constraint::Min(0),
+                Constraint::Length(panel_h),
                 Constraint::Length(1),
                 Constraint::Length(8),
             ])
             .areas(area);
+            if !players.is_empty() {
+                render_panel(panel, players, board, turn, buf);
+            }
             render_keybar(keys, turn, buf);
 
             let [chest, chance] =
@@ -177,6 +191,43 @@ fn render_center(area: Rect, overlay: &Overlay, buf: &mut Buffer) {
             render_card_slot(chance, "CHANCE", "?", CHANCE_ORANGE, buf);
         }
     }
+}
+
+/// A standings panel: one row per player with their cash and property count,
+/// the current player highlighted. Bankrupt players are dimmed.
+fn render_panel(area: Rect, players: &[Player], board: &[Space], turn: usize, buf: &mut Buffer) {
+    let area = centered_rect(area, 40, area.height.min(players.len() as u16 + 2));
+    let block = Block::bordered()
+        .title_top(Line::from(" Players ").centered())
+        .style(Style::new().bg(Color::Black).fg(Color::White));
+    let inner = block.inner(area);
+    Clear.render(area, buf);
+    block.render(area, buf);
+
+    let lines: Vec<Line> = players
+        .iter()
+        .enumerate()
+        .map(|(i, p)| {
+            let owned = board.iter().filter(|s| s.owner() == Some(i)).count();
+            let tag = if p.bankrupt {
+                " (out)".to_string()
+            } else if p.in_jail {
+                " [jail]".to_string()
+            } else {
+                String::new()
+            };
+            let text = format!(" {} P{}  ${}  {owned} props{tag} ", p.piece.icon(), i + 1, p.money);
+            let line = Line::from(text);
+            if p.bankrupt {
+                line.style(Style::new().fg(Color::DarkGray))
+            } else if i == turn {
+                line.reversed()
+            } else {
+                line
+            }
+        })
+        .collect();
+    Paragraph::new(lines).render(inner, buf);
 }
 
 /// Thin keybind bar showing whose turn it is and the global keys.
