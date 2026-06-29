@@ -361,7 +361,7 @@ impl Game {
     /// Rent owed for the space at `pos`, owned by `owner`.
     fn rent(&self, pos: usize, owner: usize, total: usize) -> u32 {
         match &self.board[pos] {
-            Space::Property(p) => p.rent,
+            Space::Property(p) => p.current_rent(),
             Space::Railroad(_) => RAILROAD_BASE_RENT * self.count_kind(owner, Kind::Railroad),
             Space::Utility(_) => {
                 let multiplier = if self.count_kind(owner, Kind::Utility) == 2 { 10 } else { 4 };

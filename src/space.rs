@@ -32,13 +32,15 @@ impl ColorGroup {
     }
 }
 
-/// Fields shared by every buyable space: a name, a purchase price, and an
-/// optional owner (`None` = bank, `Some(i)` = player `i`).
+/// Fields shared by every buyable space: a name, a purchase price, an optional
+/// owner (`None` = bank, `Some(i)` = player `i`), and whether it's mortgaged.
+/// Railroads, utilities, and streets can all be mortgaged.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Ownable {
     pub name: String,
     pub price: u32,
     pub owner: Option<usize>,
+    pub mortgaged: bool,
 }
 
 impl Ownable {
@@ -47,6 +49,7 @@ impl Ownable {
             name: name.to_string(),
             price,
             owner: None,
+            mortgaged: false,
         }
     }
 }
@@ -56,7 +59,20 @@ impl Ownable {
 pub struct Property {
     pub base: Ownable,
     pub group: ColorGroup,
-    pub rent: u32, // base rent, no houses
+    /// Rent by development level: `[base, 1 house, 2, 3, 4, hotel]`.
+    pub rents: [u32; 6],
+    /// Cost of one house (a hotel costs four houses + this again).
+    pub house_cost: u32,
+    /// Houses built: 0–4, where 5 means a hotel.
+    pub houses: u8,
+}
+
+impl Property {
+    /// Rent owed right now, before monopoly doubling. With houses, the matching
+    /// tier; with none, the base rent.
+    pub fn current_rent(&self) -> u32 {
+        self.rents[self.houses.min(5) as usize]
+    }
 }
 
 /// Every square is exactly one of these; each variant carries only its own data.
@@ -75,11 +91,19 @@ pub enum Space {
 }
 
 impl Space {
-    pub fn street(name: &str, group: ColorGroup, price: u32, rent: u32) -> Self {
+    pub fn street(
+        name: &str,
+        group: ColorGroup,
+        price: u32,
+        rents: [u32; 6],
+        house_cost: u32,
+    ) -> Self {
         Space::Property(Property {
             base: Ownable::new(name, price),
             group,
-            rent,
+            rents,
+            house_cost,
+            houses: 0,
         })
     }
 
