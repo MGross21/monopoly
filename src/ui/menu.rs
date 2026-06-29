@@ -29,10 +29,8 @@ impl Menu {
         match key {
             KeyCode::Up => self.cursor.up(),
             KeyCode::Down => self.cursor.down(),
-            KeyCode::Enter => {
-                if OPTIONS[self.cursor.selected] == "Start New Game" {
-                    return MenuAction::NewGame;
-                }
+            KeyCode::Enter if OPTIONS[self.cursor.selected] == "Start New Game" => {
+                return MenuAction::NewGame;
             }
             KeyCode::Esc => return MenuAction::Quit,
             _ => {}

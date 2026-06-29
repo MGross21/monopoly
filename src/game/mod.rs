@@ -39,6 +39,7 @@ pub struct Game {
     can_roll: bool,
     has_rolled: bool, // rolled at least once this turn
     clock: Duration,  // drives the breathing highlight
+    done: bool,       // game over acknowledged; main returns to the menu
 }
 
 /// The single popup the game is currently showing, if any. Holding these in one
@@ -51,6 +52,7 @@ enum Modal {
     Menu(ActionMenu),
     ConfirmEnd(Confirm),
     Info(InfoBox),
+    GameOver(usize), // winning player index
 }
 
 /// A Chance / Community Chest card animation playing in the center.
@@ -67,10 +69,21 @@ struct InfoBox {
 
 impl Game {
     pub fn new(players: Vec<Player>) -> Self {
+        // Turn order: every player rolls two dice, highest total goes first
+        // (ties broken by the earlier player).
+        let mut first = 0;
+        let mut best = 0u8;
+        for i in 0..players.len() {
+            let total = rand::random_range(1..=6) + rand::random_range(1..=6);
+            if total > best {
+                best = total;
+                first = i;
+            }
+        }
         let mut game = Self {
             players,
             board: board(),
-            current: 0,
+            current: first,
             modal: Modal::None,
             // Cap how many toasts stack at once so a single turn's events don't
             // pile up and flicker.
@@ -79,9 +92,17 @@ impl Game {
             can_roll: true,
             has_rolled: false,
             clock: Duration::ZERO,
+            done: false,
         };
-        game.notify("Player 1's turn", Level::Info);
+        game.notify(format!("Player {} wins the roll-off", first + 1), Level::Info);
+        game.notify(format!("Player {}'s turn", first + 1), Level::Info);
         game
+    }
+
+    /// True once the winner has been shown and the player dismissed it; `main`
+    /// reads this to return to the menu.
+    pub fn is_done(&self) -> bool {
+        self.done
     }
 
     pub fn overlay(&self) -> Overlay {
@@ -128,6 +149,9 @@ impl Game {
 
     pub fn handle_key(&mut self, key: KeyCode) {
         match &mut self.modal {
+            // The game is over; any key returns to the menu (via `main`).
+            Modal::GameOver(_) => self.done = true,
+
             // An info popup blocks everything; any key dismisses it.
             Modal::Info(_) => self.modal = Modal::None,
 
@@ -231,6 +255,16 @@ impl Game {
 
         self.resolve_landing(new, total);
 
+        // If paying rent/tax wiped the player out, the turn is over. `bankrupt`
+        // has already either ended the game (Modal::GameOver) or there are still
+        // players left, in which case play passes on.
+        if self.players[who].bankrupt {
+            if !matches!(self.modal, Modal::GameOver(_)) {
+                self.end_turn();
+            }
+            return;
+        }
+
         // Doubles earn another roll; non-doubles end the right to roll. Three
         // doubles in a row sends you to Jail and ends the turn.
         if a == b {
@@ -304,7 +338,14 @@ impl Game {
         self.doubles = 0;
         self.can_roll = true;
         self.has_rolled = false;
-        self.current = (self.current + 1) % self.players.len();
+        // Skip anyone already eliminated. At least one player is still in (else
+        // the game is over), so this loop always terminates.
+        loop {
+            self.current = (self.current + 1) % self.players.len();
+            if !self.players[self.current].bankrupt {
+                break;
+            }
+        }
         self.notify(format!("Player {}'s turn", self.current + 1), Level::Info);
     }
 
@@ -335,27 +376,63 @@ impl Game {
 
     fn pay_bank(&mut self, amount: u32) {
         let who = self.current;
-        self.players[who].money = self.players[who].money.saturating_sub(amount);
-        self.notify(format!("Player {} paid ${amount} in tax", who + 1), Level::Warn);
+        if self.players[who].money >= amount {
+            self.players[who].money -= amount;
+            self.notify(format!("Player {} paid ${amount} in tax", who + 1), Level::Warn);
+        } else {
+            let paid = self.players[who].money;
+            self.players[who].money = 0;
+            self.notify(
+                format!("Player {} owed ${amount} but had ${paid} — bankrupt", who + 1),
+                Level::Error,
+            );
+            self.bankrupt(who, None);
+        }
     }
 
-    /// Transfer rent from the current player to `owner`. Only what the payer can
-    /// actually afford moves — no money is created out of nothing.
+    /// Pay rent from the current player to `owner`. If the player can't cover it,
+    /// they hand over everything they have and go bankrupt to `owner`.
     fn pay_player(&mut self, owner: usize, rent: u32) {
         let who = self.current;
-        let paid = self.players[who].money.min(rent);
-        self.players[who].money -= paid;
-        self.players[owner].money += paid;
-        let msg = if paid < rent {
-            format!(
-                "Player {} could only pay ${paid} of ${rent} rent to Player {}",
-                who + 1,
-                owner + 1
-            )
+        if self.players[who].money >= rent {
+            self.players[who].money -= rent;
+            self.players[owner].money += rent;
+            self.notify(format!("Player {} paid ${rent} rent to Player {}", who + 1, owner + 1), Level::Warn);
         } else {
-            format!("Player {} paid ${paid} rent to Player {}", who + 1, owner + 1)
-        };
-        self.notify(msg, Level::Warn);
+            let paid = self.players[who].money;
+            self.players[who].money = 0;
+            self.players[owner].money += paid;
+            self.notify(
+                format!("Player {} paid ${paid} of ${rent} rent then went bankrupt to Player {}", who + 1, owner + 1),
+                Level::Error,
+            );
+            self.bankrupt(who, Some(owner));
+        }
+    }
+
+    /// Eliminate `who`: hand their estate to `creditor` (a player) or back to the
+    /// bank, then check whether only one player remains.
+    fn bankrupt(&mut self, who: usize, creditor: Option<usize>) {
+        self.players[who].bankrupt = true;
+        for space in &mut self.board {
+            if space.owner() == Some(who) {
+                space.set_owner(creditor);
+                if creditor.is_none() {
+                    space.reset_buildings(); // back to the bank's stock
+                }
+            }
+        }
+        self.notify(format!("Player {} is out of the game", who + 1), Level::Error);
+        self.check_win();
+    }
+
+    /// If only one player is left standing, end the game.
+    fn check_win(&mut self) {
+        let mut alive = (0..self.players.len()).filter(|&i| !self.players[i].bankrupt);
+        if let (Some(winner), None) = (alive.next(), alive.next()) {
+            self.notify(format!("Player {} wins!", winner + 1), Level::Info);
+            self.modal = Modal::GameOver(winner);
+        }
     }
 
     /// Rent owed for the space at `pos`, owned by `owner`.
@@ -420,6 +497,11 @@ impl Game {
             Modal::Menu(menu) => menu.render(frame, self.current, self.players[self.current].money),
             Modal::ConfirmEnd(confirm) => confirm.render(frame, " End your turn? "),
             Modal::Info(info) => crate::ui::info_popup(frame, &info.title, &info.lines),
+            Modal::GameOver(winner) => crate::ui::info_popup(
+                frame,
+                &format!(" Player {} wins! ", winner + 1),
+                &["Press any key to return to the menu".to_string()],
+            ),
             Modal::None => {}
         }
         let area = frame.area();

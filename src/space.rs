@@ -167,6 +167,17 @@ impl Space {
         }
     }
 
+    /// Return a space to the bank's stock: clear any houses and the mortgage so
+    /// the next buyer gets it undeveloped.
+    pub fn reset_buildings(&mut self) {
+        if let Space::Property(p) = self {
+            p.houses = 0;
+        }
+        if let Some(o) = self.ownable_mut() {
+            o.mortgaged = false;
+        }
+    }
+
     /// Banner icon for non-property spaces. `None` = show the name only.
     ///
     /// Nerd Font glyphs (monochrome, honor `fg`/bold) — needs a Nerd Font in the

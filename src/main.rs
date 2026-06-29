@@ -129,7 +129,11 @@ fn run(terminal: &mut DefaultTerminal) -> Result<()> {
             }
             App::Playing(g) => {
                 g.handle_key(key.code);
-                Transition::Stay
+                if g.is_done() {
+                    Transition::ToMenu
+                } else {
+                    Transition::Stay
+                }
             }
         };
 
