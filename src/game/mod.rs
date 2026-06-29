@@ -16,6 +16,11 @@ use ratatui_notifications::{
 };
 
 mod action;
+mod cards;
+
+use std::collections::VecDeque;
+
+use cards::{Card, CardEffect, chance_deck, chest_deck};
 
 use crate::board::board;
 use crate::player::Player;
@@ -41,6 +46,8 @@ pub struct Game {
     has_rolled: bool, // rolled at least once this turn
     clock: Duration,  // drives the breathing highlight
     done: bool,       // game over acknowledged; main returns to the menu
+    chance: VecDeque<Card>,
+    chest: VecDeque<Card>,
 }
 
 /// The single popup the game is currently showing, if any. Holding these in one
@@ -130,10 +137,11 @@ impl JailMenu {
     }
 }
 
-/// A Chance / Community Chest card animation playing in the center.
+/// A Chance / Community Chest card animation playing in the center. The drawn
+/// `card`'s effect is applied once the animation settles (or is skipped).
 struct CardDraw {
     clip: Clip,
-    title: &'static str,
+    card: Card,
 }
 
 /// A centered info popup (e.g. owned-property list) dismissed with any key.
@@ -168,6 +176,8 @@ impl Game {
             has_rolled: false,
             clock: Duration::ZERO,
             done: false,
+            chance: shuffled(chance_deck()),
+            chest: shuffled(chest_deck()),
         };
         game.notify(format!("Player {} wins the roll-off", first + 1), Level::Info);
         game.notify(format!("Player {}'s turn", first + 1), Level::Info);
@@ -211,12 +221,17 @@ impl Game {
             self.apply_roll(a, b);
         }
 
-        // Advance a card draw; close it when it finishes.
+        // Advance a card draw; apply its effect once the animation settles.
+        let mut finished_card = None;
         if let Modal::Card(card) = &mut self.modal {
             card.clip.tick(dice::card_animation(), delta);
             if card.clip.finished(dice::card_animation()) {
-                self.modal = Modal::None;
+                finished_card = Some(card.card);
             }
+        }
+        if let Some(card) = finished_card {
+            self.modal = Modal::None;
+            self.finish_card(card);
         }
     }
 
@@ -284,10 +299,13 @@ impl Game {
                 _ => {}
             },
 
-            // A card animation blocks input; Space/Enter skips it.
-            Modal::Card(_) => {
+            // A card animation blocks input; Space/Enter skips straight to the
+            // card's effect.
+            Modal::Card(card) => {
                 if matches!(key, KeyCode::Char(' ') | KeyCode::Enter) {
+                    let drawn = card.card;
                     self.modal = Modal::None;
+                    self.finish_card(drawn);
                 }
             }
 
@@ -421,8 +439,8 @@ impl Game {
         match self.board[pos].clone() {
             Space::Tax(amount) => self.pay_bank(amount),
             Space::GoToJail => self.send_to_jail(),
-            Space::Chance => self.draw_card(" Chance "),
-            Space::CommunityChest => self.draw_card(" Community Chest "),
+            Space::Chance => self.draw_card(Deck::Chance),
+            Space::CommunityChest => self.draw_card(Deck::Chest),
             space if space.is_ownable() => match space.owner() {
                 None => self.notify("Unowned — open the menu to buy it", Level::Info),
                 Some(owner) if owner != self.current => {
@@ -435,13 +453,123 @@ impl Game {
         }
     }
 
-    /// Start the card-draw animation for a Chance / Community Chest landing.
-    fn draw_card(&mut self, title: &'static str) {
-        self.modal = Modal::Card(CardDraw {
-            clip: Clip::new(),
-            title,
-        });
+    /// Draw the top card of a deck (recycling it to the bottom) and start its
+    /// animation. The effect is applied once the animation settles.
+    fn draw_card(&mut self, deck: Deck) {
+        let pile = match deck {
+            Deck::Chance => &mut self.chance,
+            Deck::Chest => &mut self.chest,
+        };
+        let Some(card) = pile.pop_front() else {
+            return;
+        };
+        pile.push_back(card); // recycle to the bottom of the deck
+        self.modal = Modal::Card(CardDraw { clip: Clip::new(), card });
         self.notify(format!("Player {} draws a card", self.current + 1), Level::Info);
+    }
+
+    /// Apply a card's effect, then either show its text or hand off the turn if
+    /// it ended in jail or bankruptcy.
+    fn finish_card(&mut self, card: Card) {
+        let who = self.current;
+        self.apply_card(card.effect);
+        // A card can jail or bankrupt the drawer; settle the turn accordingly.
+        if self.players[who].in_jail {
+            self.can_roll = false;
+        }
+        if self.players[who].bankrupt {
+            if !matches!(self.modal, Modal::GameOver(_)) {
+                self.end_turn();
+            }
+            return;
+        }
+        // Show the card text unless the effect already opened something (e.g. a
+        // chained card draw from advancing onto another Chance space).
+        if matches!(self.modal, Modal::None) {
+            self.modal = Modal::Info(InfoBox {
+                title: card.title.to_string(),
+                lines: vec![card.text.to_string()],
+            });
+        }
+    }
+
+    /// Carry out a single card effect for the current player.
+    fn apply_card(&mut self, effect: CardEffect) {
+        let who = self.current;
+        match effect {
+            CardEffect::Collect(n) => {
+                self.players[who].money += n;
+                self.notify(format!("Player {} collected ${n}", who + 1), Level::Info);
+            }
+            CardEffect::Pay(n) => self.pay_bank(n),
+            CardEffect::CollectEach(n) => {
+                for i in 0..self.players.len() {
+                    if i == who || self.players[i].bankrupt {
+                        continue;
+                    }
+                    let paid = self.players[i].money.min(n);
+                    self.players[i].money -= paid;
+                    self.players[who].money += paid;
+                }
+                self.notify(format!("Player {} collected ${n} from each player", who + 1), Level::Info);
+            }
+            CardEffect::PayEach(n) => {
+                let others: Vec<usize> =
+                    (0..self.players.len()).filter(|&i| i != who && !self.players[i].bankrupt).collect();
+                let owed = n * others.len() as u32;
+                if self.players[who].money >= owed {
+                    self.players[who].money -= owed;
+                    for i in others {
+                        self.players[i].money += n;
+                    }
+                    self.notify(format!("Player {} paid ${n} to each player", who + 1), Level::Warn);
+                } else {
+                    // Hand out what's left, then go bankrupt to the bank.
+                    let mut left = self.players[who].money;
+                    for i in others {
+                        let paid = left.min(n);
+                        self.players[i].money += paid;
+                        left -= paid;
+                    }
+                    self.players[who].money = left;
+                    self.bankrupt(who, None);
+                }
+            }
+            CardEffect::AdvanceTo(dest) => {
+                let pos = self.players[who].position;
+                let steps = (dest + 40 - pos) % 40;
+                self.advance(who, steps);
+            }
+            CardEffect::Back(n) => {
+                let pos = self.players[who].position;
+                let new = (pos + 40 - n) % 40;
+                self.players[who].position = new;
+                let name = self.board[new].name().to_string();
+                self.notify(format!("Player {} moved back to {name}", who + 1), Level::Info);
+                self.resolve_landing(new, n);
+            }
+            CardEffect::GoToJail => self.send_to_jail(),
+            CardEffect::GetOutFree => {
+                self.players[who].get_out_free += 1;
+                self.notify(format!("Player {} kept a Get Out of Jail Free card", who + 1), Level::Info);
+            }
+            CardEffect::Repairs { per_house, per_hotel } => {
+                let mut houses = 0;
+                let mut hotels = 0;
+                for space in &self.board {
+                    if space.owner() == Some(who) {
+                        match space.houses() {
+                            5 => hotels += 1,
+                            n => houses += n as u32,
+                        }
+                    }
+                }
+                let bill = houses * per_house + hotels * per_hotel;
+                if bill > 0 {
+                    self.pay_bank(bill);
+                }
+            }
+        }
     }
 
     fn buy_current(&mut self) {
@@ -877,7 +1005,7 @@ impl Game {
         match &self.modal {
             Modal::Roll(roll) => dice::render(frame, dice::animation(), roll),
             Modal::Card(card) => {
-                dice::render_clip(frame, dice::card_animation(), &card.clip, card.title)
+                dice::render_clip(frame, dice::card_animation(), &card.clip, card.card.title)
             }
             Modal::Menu(menu) => menu.render(frame, self.current, self.players[self.current].money),
             Modal::ConfirmEnd(confirm) => confirm.render(frame, " End your turn? "),
@@ -906,4 +1034,20 @@ impl Game {
 enum Kind {
     Railroad,
     Utility,
+}
+
+/// Which card deck to draw from.
+#[derive(Clone, Copy)]
+enum Deck {
+    Chance,
+    Chest,
+}
+
+/// Fisher-Yates shuffle into a draw pile.
+fn shuffled(mut cards: Vec<Card>) -> VecDeque<Card> {
+    for i in (1..cards.len()).rev() {
+        let j = rand::random_range(0..=i);
+        cards.swap(i, j);
+    }
+    cards.into()
 }
