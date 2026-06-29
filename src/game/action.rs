@@ -14,6 +14,7 @@ use crate::ui::{Cursor, centered_rect};
 pub enum TurnAction {
     RollDice,
     BuyProperty,
+    BuildHouses,
     Trade,
     ViewInventory,
     Mortgages,
@@ -22,9 +23,10 @@ pub enum TurnAction {
 
 /// The actions in menu order, each with its label and hotkey. Single source of
 /// truth: add an action by adding a row.
-const ACTIONS: [(TurnAction, &str, char); 6] = [
+const ACTIONS: [(TurnAction, &str, char); 7] = [
     (TurnAction::RollDice, "Roll Dice", 'r'),
     (TurnAction::BuyProperty, "Buy Property", 'b'),
+    (TurnAction::BuildHouses, "Build Houses", 'h'),
     (TurnAction::Trade, "Trade", 't'),
     (TurnAction::ViewInventory, "View Inventory", 'i'),
     (TurnAction::Mortgages, "Mortgages", 'g'),

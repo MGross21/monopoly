@@ -167,6 +167,33 @@ impl Space {
         }
     }
 
+    /// Is this space currently mortgaged?
+    pub fn is_mortgaged(&self) -> bool {
+        self.ownable().is_some_and(|o| o.mortgaged)
+    }
+
+    pub fn set_mortgaged(&mut self, value: bool) {
+        if let Some(o) = self.ownable_mut() {
+            o.mortgaged = value;
+        }
+    }
+
+    /// Houses built on a street (0–4, 5 = hotel); 0 for anything else.
+    pub fn houses(&self) -> u8 {
+        match self {
+            Space::Property(p) => p.houses,
+            _ => 0,
+        }
+    }
+
+    /// Cost of one house on this street, or 0 if it can't be built on.
+    pub fn house_cost(&self) -> u32 {
+        match self {
+            Space::Property(p) => p.house_cost,
+            _ => 0,
+        }
+    }
+
     /// Return a space to the bank's stock: clear any houses and the mortgage so
     /// the next buyer gets it undeveloped.
     pub fn reset_buildings(&mut self) {

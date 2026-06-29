@@ -136,9 +136,16 @@ pub fn info_popup(frame: &mut Frame, title: &str, lines: &[String]) {
     frame.render_widget(Paragraph::new(body), inner);
 }
 
-/// Centered black popup listing `options` with `selected` highlighted.
-pub fn choice_popup(frame: &mut Frame, title: &str, options: &[&str], selected: usize) {
-    let area = centered_rect(frame.area(), 28, options.len() as u16 + 2);
+/// Centered black popup listing `options` with `selected` highlighted. Width
+/// grows to fit the longest option (and the title), with a 28-col floor.
+pub fn choice_popup<S: AsRef<str>>(frame: &mut Frame, title: &str, options: &[S], selected: usize) {
+    let longest = options
+        .iter()
+        .map(|o| o.as_ref().chars().count())
+        .max()
+        .unwrap_or(0) as u16;
+    let width = (longest + 4).max(title.chars().count() as u16 + 4).max(28);
+    let area = centered_rect(frame.area(), width, options.len() as u16 + 2);
     let block = Block::bordered()
         .title_top(Line::from(title).centered())
         .style(Style::new().bg(Color::Black).fg(Color::White).bold());
