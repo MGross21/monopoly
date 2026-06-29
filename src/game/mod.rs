@@ -19,7 +19,7 @@ mod action;
 
 use crate::board::board;
 use crate::player::Player;
-use crate::space::Space;
+use crate::space::{ColorGroup, Space};
 use crate::ui::dice::{self, Clip, Roll};
 use crate::ui::map::Overlay;
 use crate::ui::{Confirm, ConfirmResult, Cursor, choice_popup};
@@ -575,17 +575,49 @@ impl Game {
         }
     }
 
-    /// Rent owed for the space at `pos`, owned by `owner`.
+    /// Rent owed for the space at `pos`, owned by `owner`. A mortgaged space
+    /// collects nothing.
     fn rent(&self, pos: usize, owner: usize, total: usize) -> u32 {
         match &self.board[pos] {
-            Space::Property(p) => p.current_rent(),
+            Space::Property(p) => {
+                if p.base.mortgaged {
+                    return 0;
+                }
+                // A full color group doubles the base rent, but only while the
+                // group is undeveloped; once houses go up the table takes over.
+                if p.houses == 0 && self.owns_full_group(owner, p.group) {
+                    p.current_rent() * 2
+                } else {
+                    p.current_rent()
+                }
+            }
+            Space::Railroad(o) if o.mortgaged => 0,
             Space::Railroad(_) => RAILROAD_BASE_RENT * self.count_kind(owner, Kind::Railroad),
+            Space::Utility(o) if o.mortgaged => 0,
             Space::Utility(_) => {
                 let multiplier = if self.count_kind(owner, Kind::Utility) == 2 { 10 } else { 4 };
                 total as u32 * multiplier
             }
             _ => 0,
         }
+    }
+
+    /// Does `owner` hold every street in `group`? (Required to build or to earn
+    /// doubled rent.)
+    fn owns_full_group(&self, owner: usize, group: ColorGroup) -> bool {
+        let mut total = 0;
+        let mut mine = 0;
+        for space in &self.board {
+            if let Space::Property(p) = space
+                && p.group == group
+            {
+                total += 1;
+                if p.base.owner == Some(owner) {
+                    mine += 1;
+                }
+            }
+        }
+        total > 0 && mine == total
     }
 
     /// How many railroads/utilities `owner` holds.
