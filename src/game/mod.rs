@@ -22,11 +22,12 @@ use crate::player::Player;
 use crate::space::Space;
 use crate::ui::dice::{self, Clip, Roll};
 use crate::ui::map::Overlay;
-use crate::ui::{Confirm, ConfirmResult};
+use crate::ui::{Confirm, ConfirmResult, Cursor, choice_popup};
 use action::{ActionMenu, TurnAction, action_for_hotkey};
 
 const GO_SALARY: u32 = 200;
 const JAIL_INDEX: usize = 10;
+const JAIL_BAIL: u32 = 50;
 const RAILROAD_BASE_RENT: u32 = 25;
 
 pub struct Game {
@@ -52,7 +53,53 @@ enum Modal {
     Menu(ActionMenu),
     ConfirmEnd(Confirm),
     Info(InfoBox),
+    Jail(JailMenu),
     GameOver(usize), // winning player index
+}
+
+/// The choices offered to a jailed player at the start of their turn. `Pay` and
+/// `Card` only appear when available; `Roll` is always present.
+#[derive(Clone, Copy)]
+enum JailChoice {
+    Pay,
+    Roll,
+    Card,
+}
+
+/// The in-jail action picker.
+struct JailMenu {
+    choices: Vec<JailChoice>,
+    cursor: Cursor,
+}
+
+impl JailMenu {
+    fn new(can_pay: bool, has_card: bool) -> Self {
+        let mut choices = Vec::new();
+        if can_pay {
+            choices.push(JailChoice::Pay);
+        }
+        choices.push(JailChoice::Roll);
+        if has_card {
+            choices.push(JailChoice::Card);
+        }
+        let cursor = Cursor::new(choices.len());
+        Self { choices, cursor }
+    }
+
+    fn labels(&self) -> Vec<&'static str> {
+        self.choices
+            .iter()
+            .map(|c| match c {
+                JailChoice::Pay => "Pay $50 bail",
+                JailChoice::Roll => "Roll for doubles",
+                JailChoice::Card => "Use Get Out of Jail Free",
+            })
+            .collect()
+    }
+
+    fn selected(&self) -> JailChoice {
+        self.choices[self.cursor.selected]
+    }
 }
 
 /// A Chance / Community Chest card animation playing in the center.
@@ -177,6 +224,17 @@ impl Game {
                 _ => {}
             },
 
+            Modal::Jail(menu) => match key {
+                KeyCode::Up => menu.cursor.up(),
+                KeyCode::Down => menu.cursor.down(),
+                KeyCode::Esc => self.modal = Modal::None,
+                KeyCode::Enter => {
+                    let choice = menu.selected();
+                    self.resolve_jail_choice(choice);
+                }
+                _ => {}
+            },
+
             // A card animation blocks input; Space/Enter skips it.
             Modal::Card(_) => {
                 if matches!(key, KeyCode::Char(' ') | KeyCode::Enter) {
@@ -232,28 +290,45 @@ impl Game {
             self.notify("You already rolled — end your turn", Level::Warn);
             return;
         }
+        // A jailed player chooses how to get out before any roll.
+        if self.players[self.current].in_jail {
+            let p = &self.players[self.current];
+            self.modal = Modal::Jail(JailMenu::new(p.money >= JAIL_BAIL, p.get_out_free > 0));
+            return;
+        }
         self.modal = Modal::Roll(Roll::new());
     }
 
-    /// Apply a finished dice roll: move, pass GO, resolve the landing, doubles.
-    fn apply_roll(&mut self, a: u8, b: u8) {
-        let total = (a + b) as usize;
-        let who = self.current;
+    /// Move `who` forward `steps`, paying GO salary on a pass and resolving the
+    /// landing. Shared by normal and out-of-jail moves.
+    fn advance(&mut self, who: usize, steps: usize) {
         let old = self.players[who].position;
-        let passed_go = old + total >= 40;
-        let new = (old + total) % 40;
+        let passed_go = old + steps >= 40;
+        let new = (old + steps) % 40;
         self.players[who].position = new;
-        self.has_rolled = true;
-
-        self.notify(format!("Player {} rolled {a} + {b} = {}", who + 1, a + b), Level::Info);
         if passed_go {
             self.players[who].money += GO_SALARY;
             self.notify(format!("Player {} passed GO (+${GO_SALARY})", who + 1), Level::Info);
         }
         let name = self.board[new].name().to_string();
         self.notify(format!("Player {} landed on {name}", who + 1), Level::Info);
+        self.resolve_landing(new, steps);
+    }
 
-        self.resolve_landing(new, total);
+    /// Apply a finished dice roll: move, pass GO, resolve the landing, doubles.
+    fn apply_roll(&mut self, a: u8, b: u8) {
+        let total = (a + b) as usize;
+        let who = self.current;
+        self.has_rolled = true;
+        self.notify(format!("Player {} rolled {a} + {b} = {}", who + 1, a + b), Level::Info);
+
+        // A jailed player's roll only tries for doubles to escape.
+        if self.players[who].in_jail {
+            self.apply_jail_roll(who, a, b, total);
+            return;
+        }
+
+        self.advance(who, total);
 
         // If paying rent/tax wiped the player out, the turn is over. `bankrupt`
         // has already either ended the game (Modal::GameOver) or there are still
@@ -262,6 +337,13 @@ impl Game {
             if !matches!(self.modal, Modal::GameOver(_)) {
                 self.end_turn();
             }
+            return;
+        }
+
+        // Landing on "Go To Jail" ends the turn now — no bonus roll even if the
+        // move that put them there was doubles.
+        if self.players[who].in_jail {
+            self.can_roll = false;
             return;
         }
 
@@ -369,9 +451,67 @@ impl Game {
     // --- money & helpers -----------------------------------------------------
 
     fn send_to_jail(&mut self) {
-        self.players[self.current].position = JAIL_INDEX;
+        let who = self.current;
+        self.players[who].position = JAIL_INDEX;
+        self.players[who].in_jail = true;
+        self.players[who].jail_turns = 0;
         self.doubles = 0;
-        self.notify(format!("Player {} was sent to Jail", self.current + 1), Level::Warn);
+        self.notify(format!("Player {} was sent to Jail", who + 1), Level::Warn);
+    }
+
+    /// Act on the jailed player's menu choice. Pay/Card free them and roll
+    /// normally; Roll just rolls (jail semantics handled in `apply_jail_roll`).
+    fn resolve_jail_choice(&mut self, choice: JailChoice) {
+        let who = self.current;
+        match choice {
+            JailChoice::Pay => {
+                self.players[who].money -= JAIL_BAIL; // offered only when affordable
+                self.players[who].in_jail = false;
+                self.players[who].jail_turns = 0;
+                self.notify(format!("Player {} paid ${JAIL_BAIL} bail", who + 1), Level::Warn);
+            }
+            JailChoice::Card => {
+                self.players[who].get_out_free -= 1;
+                self.players[who].in_jail = false;
+                self.players[who].jail_turns = 0;
+                self.notify(format!("Player {} used a Get Out of Jail Free card", who + 1), Level::Info);
+            }
+            JailChoice::Roll => {}
+        }
+        self.modal = Modal::Roll(Roll::new());
+    }
+
+    /// Resolve a roll made from jail: doubles escape and move; otherwise count a
+    /// failed attempt, and on the third pay the $50 bail and move regardless.
+    fn apply_jail_roll(&mut self, who: usize, a: u8, b: u8, total: usize) {
+        if a == b {
+            self.players[who].in_jail = false;
+            self.players[who].jail_turns = 0;
+            self.notify(format!("Doubles! Player {} leaves Jail", who + 1), Level::Info);
+            self.advance(who, total);
+        } else {
+            self.players[who].jail_turns += 1;
+            let n = self.players[who].jail_turns;
+            if n >= 3 {
+                self.players[who].in_jail = false;
+                self.players[who].jail_turns = 0;
+                self.notify(format!("Player {} failed three times — pays ${JAIL_BAIL} bail", who + 1), Level::Warn);
+                if self.players[who].money >= JAIL_BAIL {
+                    self.players[who].money -= JAIL_BAIL;
+                    self.advance(who, total);
+                } else {
+                    self.pay_bank(JAIL_BAIL); // can't cover bail — bankrupt
+                }
+            } else {
+                self.notify(format!("Player {} failed to roll doubles ({n}/3)", who + 1), Level::Warn);
+            }
+        }
+        // Leaving jail never grants a bonus roll; the turn ends after this.
+        self.can_roll = false;
+        // A landing or the forced bail may have bankrupted the player.
+        if self.players[who].bankrupt && !matches!(self.modal, Modal::GameOver(_)) {
+            self.end_turn();
+        }
     }
 
     fn pay_bank(&mut self, amount: u32) {
@@ -497,6 +637,7 @@ impl Game {
             Modal::Menu(menu) => menu.render(frame, self.current, self.players[self.current].money),
             Modal::ConfirmEnd(confirm) => confirm.render(frame, " End your turn? "),
             Modal::Info(info) => crate::ui::info_popup(frame, &info.title, &info.lines),
+            Modal::Jail(menu) => choice_popup(frame, " In Jail ", &menu.labels(), menu.cursor.selected),
             Modal::GameOver(winner) => crate::ui::info_popup(
                 frame,
                 &format!(" Player {} wins! ", winner + 1),
