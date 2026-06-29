@@ -5,12 +5,13 @@ use crossterm::event::KeyCode;
 use crate::ui::Cursor;
 
 /// Menu entries, in display order.
-pub const OPTIONS: [&str; 1] = ["Start New Game"];
+pub const OPTIONS: [&str; 2] = ["Start New Game", "Load Game"];
 
 /// What a key press asked the menu to do.
 pub enum MenuAction {
     None,
     NewGame,
+    LoadGame,
     Quit,
 }
 
@@ -29,8 +30,12 @@ impl Menu {
         match key {
             KeyCode::Up => self.cursor.up(),
             KeyCode::Down => self.cursor.down(),
-            KeyCode::Enter if OPTIONS[self.cursor.selected] == "Start New Game" => {
-                return MenuAction::NewGame;
+            KeyCode::Enter => {
+                return match OPTIONS[self.cursor.selected] {
+                    "Start New Game" => MenuAction::NewGame,
+                    "Load Game" => MenuAction::LoadGame,
+                    _ => MenuAction::None,
+                };
             }
             KeyCode::Esc => return MenuAction::Quit,
             _ => {}

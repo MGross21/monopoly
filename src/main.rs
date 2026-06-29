@@ -40,6 +40,7 @@ enum Transition {
     ToMenu,
     ToSetup,
     ToPlaying(Vec<Player>),
+    LoadGame(Box<Game>),
     Quit,
 }
 
@@ -115,6 +116,10 @@ fn run(terminal: &mut DefaultTerminal) -> Result<()> {
         let transition = match &mut app {
             App::Menu(m) => match m.handle_key(key.code) {
                 MenuAction::NewGame => Transition::ToSetup,
+                MenuAction::LoadGame => match Game::load() {
+                    Some(game) => Transition::LoadGame(Box::new(game)),
+                    None => Transition::Stay, // no save (or unreadable); stay put
+                },
                 MenuAction::Quit => Transition::Quit,
                 MenuAction::None => Transition::Stay,
             },
@@ -142,6 +147,7 @@ fn run(terminal: &mut DefaultTerminal) -> Result<()> {
             Transition::ToMenu => app = App::Menu(Menu::new()),
             Transition::ToSetup => app = App::Setup(Setup::new()),
             Transition::ToPlaying(players) => app = App::Playing(Box::new(Game::new(players))),
+            Transition::LoadGame(game) => app = App::Playing(game),
             Transition::Quit => break,
         }
     }

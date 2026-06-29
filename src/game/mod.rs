@@ -20,6 +20,8 @@ mod cards;
 
 use std::collections::VecDeque;
 
+use serde::{Deserialize, Serialize};
+
 use cards::{Card, CardEffect, chance_deck, chest_deck};
 
 use crate::board::board;
@@ -34,6 +36,25 @@ const GO_SALARY: u32 = 200;
 const JAIL_INDEX: usize = 10;
 const JAIL_BAIL: u32 = 50;
 const RAILROAD_BASE_RENT: u32 = 25;
+
+/// Where a game is saved to / loaded from: the platform per-user data dir, e.g.
+/// `~/.local/share/monopoly/save.json` on Linux. `None` if no such dir exists.
+fn save_path() -> Option<std::path::PathBuf> {
+    dirs::data_dir().map(|dir| dir.join("monopoly").join("save.json"))
+}
+
+/// The persistent slice of a game. Transient UI state (the active popup,
+/// notifications, the clock) and the card decks are not saved — decks are
+/// reshuffled on load since their text is `&'static`.
+#[derive(Serialize, Deserialize)]
+struct Save {
+    players: Vec<Player>,
+    board: Vec<Space>,
+    current: usize,
+    doubles: u8,
+    can_roll: bool,
+    has_rolled: bool,
+}
 
 pub struct Game {
     pub players: Vec<Player>,
@@ -227,6 +248,58 @@ impl Game {
         self.done
     }
 
+    /// Build a game from saved state, with fresh transient UI and reshuffled
+    /// decks.
+    fn from_save(save: Save) -> Self {
+        Self {
+            players: save.players,
+            board: save.board,
+            current: save.current,
+            modal: Modal::None,
+            notes: Notifications::new().max_concurrent(Some(4)),
+            doubles: save.doubles,
+            can_roll: save.can_roll,
+            has_rolled: save.has_rolled,
+            clock: Duration::ZERO,
+            done: false,
+            chance: shuffled(chance_deck()),
+            chest: shuffled(chest_deck()),
+        }
+    }
+
+    /// Load the saved game, or `None` if there's no save or it can't be read.
+    pub fn load() -> Option<Self> {
+        let data = std::fs::read_to_string(save_path()?).ok()?;
+        let save: Save = serde_json::from_str(&data).ok()?;
+        Some(Self::from_save(save))
+    }
+
+    /// Write the persistent state to the save path, creating the directory if
+    /// needed, and toast success or failure.
+    fn save_game(&mut self) {
+        let save = Save {
+            players: self.players.clone(),
+            board: self.board.clone(),
+            current: self.current,
+            doubles: self.doubles,
+            can_roll: self.can_roll,
+            has_rolled: self.has_rolled,
+        };
+        let result = (|| -> Result<std::path::PathBuf, String> {
+            let path = save_path().ok_or("no data directory")?;
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+            }
+            let json = serde_json::to_string_pretty(&save).map_err(|e| e.to_string())?;
+            std::fs::write(&path, json).map_err(|e| e.to_string())?;
+            Ok(path)
+        })();
+        match result {
+            Ok(path) => self.notify(format!("Game saved to {}", path.display()), Level::Info),
+            Err(e) => self.notify(format!("Save failed: {e}"), Level::Error),
+        }
+    }
+
     pub fn overlay(&self) -> Overlay {
         Overlay::Board {
             turn: self.current,
@@ -417,6 +490,7 @@ impl Game {
             TurnAction::ViewInventory => self.show_inventory(),
             TurnAction::Trade => self.open_trade(),
             TurnAction::Mortgages => self.open_mortgages(),
+            TurnAction::SaveGame => self.save_game(),
         }
     }
 

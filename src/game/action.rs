@@ -18,18 +18,20 @@ pub enum TurnAction {
     Trade,
     ViewInventory,
     Mortgages,
+    SaveGame,
     EndTurn,
 }
 
 /// The actions in menu order, each with its label and hotkey. Single source of
 /// truth: add an action by adding a row.
-const ACTIONS: [(TurnAction, &str, char); 7] = [
+const ACTIONS: [(TurnAction, &str, char); 8] = [
     (TurnAction::RollDice, "Roll Dice", 'r'),
     (TurnAction::BuyProperty, "Buy Property", 'b'),
     (TurnAction::BuildHouses, "Build Houses", 'h'),
     (TurnAction::Trade, "Trade", 't'),
     (TurnAction::ViewInventory, "View Inventory", 'i'),
     (TurnAction::Mortgages, "Mortgages", 'g'),
+    (TurnAction::SaveGame, "Save Game", 'v'),
     (TurnAction::EndTurn, "End Turn", 'e'),
 ];
 
