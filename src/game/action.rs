@@ -3,7 +3,7 @@
 
 use ratatui::{Frame, style::Stylize, text::Line, widgets::Paragraph};
 
-use crate::ui::{Cursor, popup_frame};
+use crate::ui::{Cursor, LIST_KEYS, popup_frame};
 
 #[derive(Clone, Copy)]
 pub enum TurnAction {
@@ -25,14 +25,29 @@ const ACTIONS: [(TurnAction, &str, char); 8] = [
     (TurnAction::BuildHouses, "Build Houses", 'h'),
     (TurnAction::Trade, "Trade", 't'),
     (TurnAction::ViewInventory, "View Inventory", 'i'),
-    (TurnAction::Mortgages, "Mortgages", 'g'),
-    (TurnAction::SaveGame, "Save Game", 'v'),
+    (TurnAction::Mortgages, "Mortgages", 'm'),
+    (TurnAction::SaveGame, "Save Game", 's'),
     (TurnAction::EndTurn, "End Turn", 'e'),
 ];
 
 /// The action bound to keyboard key `c`, if any.
 pub fn action_for_hotkey(c: char) -> Option<TurnAction> {
     ACTIONS.iter().find(|(_, _, hotkey)| *hotkey == c).map(|(action, _, _)| *action)
+}
+
+/// Every action's label and hotkey, in menu order. The board's hint line is
+/// built from this, so adding a row to `ACTIONS` shows up there too.
+pub fn hotkeys() -> impl Iterator<Item = (TurnAction, &'static str, char)> {
+    ACTIONS.iter().copied()
+}
+
+/// Is this the action the player most likely wants next?
+pub fn is_primary(action: TurnAction, rolled: bool) -> bool {
+    match action {
+        TurnAction::RollDice => !rolled,
+        TurnAction::EndTurn => rolled,
+        _ => false,
+    }
 }
 
 pub struct ActionMenu {
@@ -59,8 +74,8 @@ impl ActionMenu {
     pub fn render(&self, frame: &mut Frame, current: usize, money: u32) {
         // A blank row separates "End Turn" (the last action) from the rest.
         let gap = 1u16;
-        let title = format!(" Player {} — ${money} ", current + 1);
-        let inner = popup_frame(frame, &title, 28, ACTIONS.len() as u16 + gap + 2);
+        let title = format!("Player {} — ${money}", current + 1);
+        let inner = popup_frame(frame, &title, LIST_KEYS, ACTIONS.len() as u16 + gap + 2);
 
         let last = ACTIONS.len() - 1;
         let mut lines: Vec<Line> = Vec::new();

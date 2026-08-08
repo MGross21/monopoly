@@ -11,7 +11,7 @@ use ratatui::{
     Frame,
     layout::{Constraint, Flex, Layout, Rect},
     style::{Color, Style, Stylize},
-    text::Line,
+    text::{Line, Span},
     widgets::{Block, Clear, Paragraph},
 };
 
@@ -49,13 +49,31 @@ impl Cursor {
     }
 }
 
-/// One centered `Line` per option, with `selected` drawn reversed.
-pub fn selectable_lines<S: AsRef<str>>(options: &[S], selected: usize) -> Vec<Line<'static>> {
+/// How a selectable list sits in its popup.
+#[derive(Clone, Copy, PartialEq)]
+pub enum Align {
+    /// Short, uniform options (the main menu).
+    Center,
+    /// Data rows of differing length, which read as ragged when centered.
+    Left,
+}
+
+/// One `Line` per option, with `selected` drawn reversed. `Left` rows are
+/// indented and padded to `width` so the highlight is a full-width bar.
+pub fn selectable_lines<S: AsRef<str>>(
+    options: &[S],
+    selected: usize,
+    align: Align,
+    width: u16,
+) -> Vec<Line<'static>> {
     options
         .iter()
         .enumerate()
         .map(|(i, opt)| {
-            let line = Line::from(opt.as_ref().to_string()).centered();
+            let line = match align {
+                Align::Center => Line::from(opt.as_ref().to_string()).centered(),
+                Align::Left => Line::from(format!("  {:<w$}", opt.as_ref(), w = width as usize)),
+            };
             if i == selected { line.reversed() } else { line }
         })
         .collect()
@@ -107,16 +125,63 @@ impl Confirm {
     }
 
     pub fn render(&self, frame: &mut Frame, title: &str) {
-        choice_popup(frame, title, &["Yes", "No"], self.selected);
+        choice_popup(frame, title, &["Yes", "No"], self.selected, CONFIRM_KEYS);
     }
 }
 
-/// Draw a centered, bordered black panel and return the area inside it. The
-/// shared scaffold behind every popup in the game.
-pub fn popup_frame(frame: &mut Frame, title: &str, width: u16, height: u16) -> Rect {
-    let area = centered_rect(frame.area(), width, height);
+/// Every popup is this wide, so they don't resize as the turn moves between
+/// them. Wide enough for the longest deed line and the longest key hint.
+const POPUP_W: u16 = 54;
+
+/// The hint every scrolling list shares; `keys!` builds anything else.
+pub const LIST_KEYS: &str = "↑↓ move · enter select · esc back";
+
+/// A yes/no prompt: every arrow toggles, and Esc means no.
+pub const CONFIRM_KEYS: &str = "↑↓ choose · enter confirm · esc cancel";
+
+/// Build a key-hint footer: `keys!("enter" => "build", "s" => "sell")` renders
+/// as `enter build · s sell`. The one place hint syntax is decided.
+#[macro_export]
+macro_rules! keys {
+    ($($key:expr => $action:expr),+ $(,)?) => {
+        [$(concat!($key, " ", $action)),+].join(" · ")
+    };
+}
+
+/// Split `label` at its hotkey letter so the key reads *inside* the word:
+/// `Build Houses` + `h` → `Build ` + **H** + `ouses`. Falls back to appending
+/// the key in brackets when the label doesn't contain it (e.g. Space).
+pub fn mnemonic(
+    label: &'static str,
+    key: char,
+    key_style: Style,
+    rest_style: Style,
+) -> Vec<Span<'static>> {
+    // Prefer the start of a word — the letter a player actually associates with
+    // the label. "View Inventory" + 'i' is Inventory, not the i in View.
+    let at_word_start = |i: usize| i == 0 || label[..i].ends_with(' ');
+    let hit = label
+        .char_indices()
+        .find(|&(i, c)| c.eq_ignore_ascii_case(&key) && at_word_start(i))
+        .or_else(|| label.char_indices().find(|(_, c)| c.eq_ignore_ascii_case(&key)));
+    match hit {
+        Some((i, c)) => vec![
+            Span::styled(&label[..i], rest_style),
+            Span::styled(c.to_uppercase().to_string(), key_style),
+            Span::styled(&label[i + c.len_utf8()..], rest_style),
+        ],
+        None => vec![Span::styled(label, rest_style), Span::styled(format!(" {key}"), key_style)],
+    }
+}
+
+/// Draw a centered, bordered black panel and return the area inside it. `keys`
+/// is the key-hint footer, drawn into the bottom border so it always sits in
+/// the same place and never costs a content row.
+pub fn popup_frame(frame: &mut Frame, title: &str, keys: &str, height: u16) -> Rect {
+    let area = centered_rect(frame.area(), POPUP_W, height);
     let block = Block::bordered()
-        .title_top(Line::from(title).centered())
+        .title_top(Line::from(format!(" {} ", title.trim())).centered())
+        .title_bottom(Line::from(format!(" {} ", keys.trim())).centered().dim())
         .style(Style::new().bg(Color::Black).fg(Color::White).bold());
     let inner = block.inner(area);
     frame.render_widget(Clear, area);
@@ -126,24 +191,24 @@ pub fn popup_frame(frame: &mut Frame, title: &str, width: u16, height: u16) -> R
 
 /// Centered info popup listing static `lines` (no selection). For lists too
 /// large for a toast (e.g. owned properties).
-pub fn info_popup(frame: &mut Frame, title: &str, lines: &[String]) {
+pub fn info_popup(frame: &mut Frame, title: &str, lines: &[String], keys: &str) {
     let height = (lines.len() as u16 + 2).clamp(3, frame.area().height);
-    let inner = popup_frame(frame, title, 48, height);
-    let body: Vec<Line> = if lines.is_empty() {
-        vec![Line::from("(empty)").centered()]
-    } else {
-        lines.iter().map(|l| Line::from(format!("  {l}"))).collect()
-    };
+    let inner = popup_frame(frame, title, keys, height);
+    let body: Vec<Line> = lines.iter().map(|l| Line::from(format!("  {l}"))).collect();
     frame.render_widget(Paragraph::new(body), inner);
 }
 
-/// Centered black popup listing `options` with `selected` highlighted. Width
-/// grows to fit the longest option (and the title), with a 28-col floor.
-pub fn choice_popup<S: AsRef<str>>(frame: &mut Frame, title: &str, options: &[S], selected: usize) {
-    let longest = options.iter().map(|o| o.as_ref().chars().count()).max().unwrap_or(0) as u16;
-    let width = (longest + 4).max(title.chars().count() as u16 + 4).max(28);
-    let inner = popup_frame(frame, title, width, options.len() as u16 + 2);
-    frame.render_widget(Paragraph::new(selectable_lines(options, selected)), inner);
+/// Centered black popup listing `options` with `selected` highlighted.
+pub fn choice_popup<S: AsRef<str>>(
+    frame: &mut Frame,
+    title: &str,
+    options: &[S],
+    selected: usize,
+    keys: &str,
+) {
+    let inner = popup_frame(frame, title, keys, options.len() as u16 + 2);
+    let rows = selectable_lines(options, selected, Align::Left, inner.width);
+    frame.render_widget(Paragraph::new(rows), inner);
 }
 
 #[cfg(test)]
@@ -248,7 +313,7 @@ mod tests {
 
     #[test]
     fn only_the_selected_line_is_highlighted() {
-        let lines = selectable_lines(&["one", "two", "three"], 1);
+        let lines = selectable_lines(&["one", "two", "three"], 1, Align::Center, 20);
         assert_eq!(lines.len(), 3);
         assert!(lines[1].style.add_modifier.contains(Modifier::REVERSED));
         assert!(!lines[0].style.add_modifier.contains(Modifier::REVERSED));
@@ -257,7 +322,141 @@ mod tests {
 
     #[test]
     fn a_selection_past_the_end_highlights_nothing() {
-        let lines = selectable_lines(&["one", "two"], 9);
+        let lines = selectable_lines(&["one", "two"], 9, Align::Center, 20);
         assert!(lines.iter().all(|l| !l.style.add_modifier.contains(Modifier::REVERSED)));
+    }
+}
+
+#[cfg(test)]
+mod chrome_tests {
+    use super::*;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    /// Render one popup and return its rows as trimmed strings.
+    fn draw(f: impl FnOnce(&mut Frame)) -> Vec<String> {
+        let mut terminal = Terminal::new(TestBackend::new(70, 12)).expect("backend");
+        terminal.draw(f).expect("draw");
+        let buf = terminal.backend().buffer().clone();
+        (0..buf.area.height)
+            .map(|y| {
+                (0..buf.area.width)
+                    .map(|x| buf[(x, y)].symbol())
+                    .collect::<String>()
+                    .trim_end()
+                    .to_string()
+            })
+            .filter(|row| !row.trim().is_empty())
+            .collect()
+    }
+
+    #[test]
+    fn a_mnemonic_splits_the_label_at_its_key() {
+        let text = |spans: Vec<Span>| -> Vec<String> {
+            spans.into_iter().map(|s| s.content.into_owned()).collect()
+        };
+        let plain = Style::new();
+        assert_eq!(text(mnemonic("Build Houses", 'h', plain, plain)), ["Build ", "H", "ouses"]);
+        assert_eq!(text(mnemonic("Trade", 't', plain, plain)), ["", "T", "rade"]);
+    }
+
+    #[test]
+    fn a_mnemonic_prefers_the_start_of_a_word() {
+        let text = |spans: Vec<Span>| -> Vec<String> {
+            spans.into_iter().map(|s| s.content.into_owned()).collect()
+        };
+        let plain = Style::new();
+        // Not the "i" in View.
+        assert_eq!(text(mnemonic("View Inventory", 'i', plain, plain)), ["View ", "I", "nventory"]);
+    }
+
+    #[test]
+    fn a_key_not_in_the_label_is_appended_instead() {
+        let spans = mnemonic("Roll", ' ', Style::new(), Style::new());
+        let joined: String = spans.into_iter().map(|s| s.content.into_owned()).collect();
+        assert_eq!(joined, "Roll  ");
+    }
+
+    /// Every hint string the game can show, so the vocabulary stays in step.
+    fn all_hints() -> Vec<String> {
+        use crate::game::hint_strings;
+        let mut hints = vec![LIST_KEYS.to_string(), CONFIRM_KEYS.to_string()];
+        hints.extend(hint_strings());
+        hints
+    }
+
+    #[test]
+    fn arrow_hints_always_name_both_directions() {
+        for hint in all_hints() {
+            for (one, pair) in [('↑', "↑↓"), ('↓', "↑↓"), ('←', "←→"), ('→', "←→")]
+            {
+                if hint.contains(one) {
+                    assert!(hint.contains(pair), "{hint:?} shows one arrow of a pair");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn hints_spell_keys_the_same_way_everywhere() {
+        for hint in all_hints() {
+            assert!(!hint.contains('⏎'), "{hint:?}: spell Enter as `enter`");
+            assert!(!hint.contains('␣'), "{hint:?}: spell Space as `space`");
+            for word in ["Enter", "Esc", "Space"] {
+                assert!(!hint.contains(word), "{hint:?}: popup keys are lowercase");
+            }
+        }
+    }
+
+    #[test]
+    fn a_scrolling_list_always_says_how_to_scroll() {
+        for hint in all_hints() {
+            if hint.contains("select") || hint.contains("mortgage") || hint.contains("build") {
+                assert!(hint.contains("↑↓"), "{hint:?} scrolls but doesn't say so");
+            }
+        }
+    }
+
+    #[test]
+    fn the_hint_syntax_is_built_in_one_place() {
+        assert_eq!(keys!("enter" => "build"), "enter build");
+        assert_eq!(keys!("s" => "sell", "esc" => "back"), "s sell · esc back");
+    }
+
+    #[test]
+    fn a_title_sits_in_the_top_border_and_hints_in_the_bottom() {
+        let rows = draw(|f| {
+            choice_popup(f, "Build Houses", &["Baltic Ave"], 0, &keys!("s" => "sell"));
+        });
+        assert!(rows.first().expect("a top border").contains("Build Houses"));
+        assert!(rows.last().expect("a bottom border").contains("s sell"));
+        assert!(
+            !rows[1..rows.len() - 1].iter().any(|r| r.contains("s sell")),
+            "hints must not cost a content row"
+        );
+    }
+
+    #[test]
+    fn every_popup_is_the_same_width() {
+        let width = |rows: Vec<String>| rows[0].trim().chars().count();
+        let narrow = width(draw(|f| choice_popup(f, "A", &["b"], 0, "c")));
+        let wide = width(draw(|f| {
+            info_popup(
+                f,
+                "A much longer popup title",
+                &["a considerably longer body line than the other".into()],
+                &keys!("enter" => "confirm", "esc" => "back"),
+            )
+        }));
+        assert_eq!(narrow, wide, "popups must not resize between turns");
+    }
+
+    #[test]
+    fn list_rows_are_left_aligned_so_they_do_not_read_as_ragged() {
+        let rows = draw(|f| {
+            choice_popup(f, "Deeds", &["Mediterranean Ave", "Baltic Ave"], 0, "esc back");
+        });
+        let indent = |row: &String| row.find(|c: char| c.is_alphanumeric()).expect("text");
+        assert_eq!(indent(&rows[1]), indent(&rows[2]));
     }
 }

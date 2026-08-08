@@ -6,8 +6,8 @@ use ratatui::Frame;
 use ratatui_notifications::Level;
 
 use super::{Game, Modal, Payee};
-use crate::ui::choice_popup;
 use crate::ui::dice::Roll;
+use crate::ui::{LIST_KEYS, choice_popup};
 
 const JAIL_INDEX: usize = 10;
 const BAIL: u32 = 50;
@@ -140,7 +140,7 @@ impl Game {
     }
 
     pub(super) fn render_jail(&self, frame: &mut Frame, menu: &JailMenu) {
-        choice_popup(frame, " In Jail ", &menu.labels(), menu.cursor.selected);
+        choice_popup(frame, "In Jail", &menu.labels(), menu.cursor.selected, LIST_KEYS);
     }
 }
 

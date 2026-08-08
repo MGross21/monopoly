@@ -7,9 +7,14 @@ use ratatui::Frame;
 use ratatui_notifications::Level;
 
 use super::{Game, Modal};
-use crate::ui::{Cursor, choice_popup, info_popup};
+use crate::keys;
+use crate::ui::{Cursor, LIST_KEYS, choice_popup, info_popup};
 
 const STEP: u32 = 10;
+
+pub(super) fn price_keys() -> String {
+    keys!("←→" => "adjust", "enter" => "confirm", "esc" => "back")
+}
 
 /// What the bail on a Get Out of Jail Free card is worth, used as the opening
 /// price when one is put up for trade.
@@ -191,7 +196,7 @@ impl Game {
                     .iter()
                     .map(|&p| format!("Player {}  (${})", p + 1, self.players[p].money))
                     .collect();
-                choice_popup(frame, " Trade — pick a player ", &labels, t.pcursor.selected);
+                choice_popup(frame, "Trade — player", &labels, t.pcursor.selected, LIST_KEYS);
             }
             Stage::Item => {
                 let labels: Vec<String> = t
@@ -201,7 +206,7 @@ impl Game {
                         format!("{}  (Player {})", item.label(self), item.holder(self) + 1)
                     })
                     .collect();
-                choice_popup(frame, " Trade — pick an item ", &labels, t.item_cursor.selected);
+                choice_popup(frame, "Trade — item", &labels, t.item_cursor.selected, LIST_KEYS);
             }
             Stage::Price => {
                 let item = t.items[t.item_cursor.selected];
@@ -210,9 +215,8 @@ impl Game {
                 let lines = vec![
                     format!("{} from Player {}", item.label(self), seller + 1),
                     format!("Player {} pays ${}", buyer + 1, t.price),
-                    "[←/→] adjust   [enter] confirm   [esc] back".to_string(),
                 ];
-                info_popup(frame, " Trade — price ", &lines);
+                info_popup(frame, "Trade — price", &lines, &price_keys());
             }
         }
     }

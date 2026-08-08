@@ -10,7 +10,7 @@ const UTILITY_PRICE: u32 = 150;
 /// The 40 spaces in order, index 0 = GO.
 pub fn board() -> Vec<Space> {
     use ColorGroup::*;
-    let street = Space::street;
+    let street = |name, group, price, rents, cost| Space::street(name, group, price, rents, cost);
     let railroad = |name| Space::railroad(name, RAILROAD_PRICE);
     let utility = |name| Space::utility(name, UTILITY_PRICE);
     // Each street: name, group, price, rent table [base, 1h, 2h, 3h, 4h, hotel],

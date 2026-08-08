@@ -6,8 +6,17 @@ use ratatui::Frame;
 use ratatui_notifications::Level;
 
 use super::{Game, HOTEL, Modal};
+use crate::keys;
 use crate::space::{ColorGroup, Space};
 use crate::ui::{Cursor, choice_popup};
+
+pub(super) fn mortgage_keys() -> String {
+    keys!("↑↓" => "move", "enter" => "toggle", "esc" => "back")
+}
+
+pub(super) fn build_keys() -> String {
+    keys!("↑↓" => "move", "enter" => "build", "s" => "sell", "esc" => "back")
+}
 
 /// Whether the estate popup is mortgaging or building.
 #[derive(Clone, Copy, PartialEq)]
@@ -234,9 +243,9 @@ impl Game {
     }
 
     pub(super) fn render_estate(&self, frame: &mut Frame, menu: &EstateMenu) {
-        let title = match menu.mode {
-            Mode::Mortgage => " Mortgages ",
-            Mode::Build => " Build Houses (Enter buy, s sell) ",
+        let (title, keys) = match menu.mode {
+            Mode::Mortgage => ("Mortgages", mortgage_keys()),
+            Mode::Build => ("Build Houses", build_keys()),
         };
         let lines: Vec<String> = menu
             .slots
@@ -261,7 +270,7 @@ impl Game {
                 }
             })
             .collect();
-        choice_popup(frame, title, &lines, menu.cursor.selected);
+        choice_popup(frame, title, &lines, menu.cursor.selected, &keys);
     }
 }
 

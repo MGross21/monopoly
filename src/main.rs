@@ -18,7 +18,7 @@ mod ui;
 use crate::board::board;
 use crate::game::Game;
 use crate::player::Player;
-use crate::ui::map::{BOARD_BG, BOARD_H, BOARD_W, Map, Overlay, render_warning};
+use crate::ui::map::{BOARD_BG, BOARD_H, BOARD_W, BoardKeys, Map, Overlay, render_warning};
 use crate::ui::menu::{Menu, MenuAction};
 use crate::ui::setup::Setup;
 use crate::ui::{Confirm, ConfirmResult};
@@ -177,7 +177,11 @@ fn render(frame: &mut Frame, app: &mut App, quit: Option<&Confirm>) {
         }
         App::Setup(_) => {
             board_owned = board();
-            (board_owned.as_slice(), empty.as_slice(), Overlay::Board { turn: 0, breath: 0.0 })
+            (
+                board_owned.as_slice(),
+                empty.as_slice(),
+                Overlay::Board { turn: 0, breath: 0.0, keys: BoardKeys::Setup },
+            )
         }
         App::Playing(g) => (g.board.as_slice(), g.players.as_slice(), g.overlay()),
     };

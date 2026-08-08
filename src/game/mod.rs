@@ -15,7 +15,7 @@ use ratatui_notifications::{
     SizeConstraint,
 };
 
-mod action;
+pub mod action;
 mod auction;
 mod cards;
 mod debt;
@@ -43,7 +43,7 @@ use crate::board::board;
 use crate::player::Player;
 use crate::space::Space;
 use crate::ui::dice::{self, Roll};
-use crate::ui::map::Overlay;
+use crate::ui::map::{BoardKeys, Overlay};
 use crate::ui::{Confirm, ConfirmResult};
 use action::{ActionMenu, TurnAction, action_for_hotkey};
 
@@ -101,6 +101,19 @@ enum Modal {
     Trade(Trade),
     Debt(Debt),
     GameOver(usize), // winning player index
+}
+
+/// Every key-hint string the game can put on screen. Tests use it to keep the
+/// hint vocabulary consistent across popups.
+#[cfg(test)]
+pub fn hint_strings() -> Vec<String> {
+    vec![
+        estate::mortgage_keys(),
+        estate::build_keys(),
+        debt::debt_keys(),
+        auction::auction_keys(),
+        trade::price_keys(),
+    ]
 }
 
 /// A centered info popup (e.g. owned-property list) dismissed with any key.
@@ -178,7 +191,14 @@ impl Game {
     }
 
     pub fn overlay(&self) -> Overlay {
-        Overlay::Board { turn: self.current, breath: self.breath() }
+        let keys = if self.players[self.current].in_jail {
+            BoardKeys::Jailed
+        } else if self.can_roll {
+            BoardKeys::Roll
+        } else {
+            BoardKeys::Rolled
+        };
+        Overlay::Board { turn: self.current, breath: self.breath(), keys }
     }
 
     /// Breathing brightness 0..1, a slow sine over the game clock.
@@ -293,7 +313,7 @@ impl Game {
             }
 
             Modal::None => match key {
-                KeyCode::Char('m') | KeyCode::Enter => self.modal = Modal::Menu(ActionMenu::new()),
+                KeyCode::Enter => self.modal = Modal::Menu(ActionMenu::new()),
                 KeyCode::Char(' ') => self.start_roll(),
                 // Action hotkeys work outside the menu for faster turns.
                 KeyCode::Char(c) => {
@@ -522,15 +542,18 @@ impl Game {
 
     fn show_inventory(&mut self) {
         let me = self.current;
-        let lines: Vec<String> = self
+        let mut lines: Vec<String> = self
             .estate(me)
             .map(|s| match s.price() {
                 Some(price) => format!("{}  (${price})", s.name()),
                 None => s.name().to_string(),
             })
             .collect();
+        if lines.is_empty() {
+            lines.push("(nothing owned yet)".to_string());
+        }
         self.modal = Modal::Info(InfoBox {
-            title: format!(" Player {} — ${} ", me + 1, self.players[me].money),
+            title: format!("Player {} — ${}", me + 1, self.players[me].money),
             lines,
         });
     }
@@ -650,21 +673,24 @@ impl Game {
                 dice::render_clip(frame, dice::card_animation(), &card.clip, card.card.title)
             }
             Modal::Menu(menu) => menu.render(frame, self.current, self.players[self.current].money),
-            Modal::ConfirmEnd(confirm) => confirm.render(frame, " End your turn? "),
-            Modal::Info(info) => crate::ui::info_popup(frame, &info.title, &info.lines),
+            Modal::ConfirmEnd(confirm) => confirm.render(frame, "End your turn?"),
+            Modal::Info(info) => {
+                crate::ui::info_popup(frame, &info.title, &info.lines, "any key close")
+            }
             Modal::Jail(menu) => self.render_jail(frame, menu),
             Modal::Estate(menu) => self.render_estate(frame, menu),
             Modal::Buy { confirm, pos } => {
                 let price = self.board[*pos].price().unwrap_or(0);
-                confirm.render(frame, &format!(" Buy {} for ${price}? ", self.board[*pos].name()));
+                confirm.render(frame, &format!("Buy {} for ${price}?", self.board[*pos].name()));
             }
             Modal::Auction(auc) => self.render_auction(frame, auc),
             Modal::Trade(t) => self.render_trade(frame, t),
             Modal::Debt(d) => self.render_debt(frame, d),
             Modal::GameOver(winner) => crate::ui::info_popup(
                 frame,
-                &format!(" Player {} wins! ", winner + 1),
-                &["Press any key to return to the menu".to_string()],
+                &format!("Player {} wins!", winner + 1),
+                &[],
+                "any key menu",
             ),
             Modal::None => {}
         }

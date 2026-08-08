@@ -126,8 +126,6 @@ impl Setup {
             let value = format!("{} {}", piece.icon(), piece.label());
             lines.push(self.field_line(2 + i, &format!("Player {}", i + 1), value));
         }
-        lines.push(Line::from(""));
-        lines.push(Line::from("↑/↓ move  ←/→ change  Enter start").dim());
         lines
     }
 

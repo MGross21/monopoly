@@ -6,7 +6,13 @@ use ratatui::Frame;
 use ratatui_notifications::Level;
 
 use super::{Game, HOTEL, Modal};
+use crate::keys;
 use crate::ui::{Cursor, choice_popup};
+
+/// No `esc`: a debt has to be settled one way or the other.
+pub(super) fn debt_keys() -> String {
+    keys!("↑↓" => "move", "enter" => "mortgage", "s" => "sell", "f" => "fold")
+}
 
 /// Who receives a settled debt.
 pub(super) enum Payee {
@@ -132,7 +138,7 @@ impl Game {
             KeyCode::Down => debt.cursor.down(),
             KeyCode::Enter => self.mortgage(debt.who, idx),
             KeyCode::Char('s') => self.sell_house(debt.who, idx),
-            KeyCode::Char('b') => {
+            KeyCode::Char('f') => {
                 let (left, creditor) = (self.players[debt.who].money, debt.payee.creditor());
                 self.settle(debt.who, left, &debt.payee);
                 self.bankrupt(debt.who, creditor);
@@ -155,7 +161,7 @@ impl Game {
 
     pub(super) fn render_debt(&self, frame: &mut Frame, debt: &Debt) {
         let title = format!(
-            " Player {} owes ${} — cash ${} — [enter] mortgage  [s] sell  [b] bankrupt ",
+            "Player {} owes ${} — cash ${}",
             debt.who + 1,
             debt.amount,
             self.players[debt.who].money
@@ -174,7 +180,7 @@ impl Game {
                 }
             })
             .collect();
-        choice_popup(frame, &title, &lines, debt.cursor.selected);
+        choice_popup(frame, &title, &lines, debt.cursor.selected, &debt_keys());
     }
 }
 
@@ -284,7 +290,7 @@ mod tests {
     #[test]
     fn folding_hands_the_estate_to_the_creditor() {
         let mut g = short_on_rent();
-        g.handle_key(KeyCode::Char('b'));
+        g.handle_key(KeyCode::Char('f'));
         assert!(g.players[0].bankrupt);
         assert_eq!(g.board[MEDITERRANEAN].owner(), Some(1));
         assert_eq!(g.board[BALTIC].owner(), Some(1));
@@ -300,7 +306,7 @@ mod tests {
         g.charge(0, 50, Payee::Bank);
         assert!(matches!(g.modal, Modal::Debt(_)));
 
-        g.handle_key(KeyCode::Char('b'));
+        g.handle_key(KeyCode::Char('f'));
         assert_eq!(g.board[MEDITERRANEAN].owner(), None);
         assert_eq!(g.board[BALTIC].owner(), None);
     }

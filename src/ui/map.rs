@@ -4,22 +4,37 @@ use ratatui::{
     buffer::Buffer,
     layout::{Alignment, Constraint, Flex, Layout, Rect},
     style::{Color, Style, Stylize},
-    text::Line,
+    text::{Line, Span},
     widgets::{Block, Clear, Paragraph, Widget, Wrap},
 };
 
 use tui_big_text::{BigText, PixelSize};
 
+use crate::game::action;
 use crate::player::Player;
 use crate::space::Space;
 use crate::ui::menu::OPTIONS;
-use crate::ui::{centered_rect, selectable_lines};
+use crate::ui::{Align, centered_rect, mnemonic, selectable_lines};
 
 /// What to draw in the hollow center: the main menu, or the in-game board
 /// (keybind bar + card slots), tagged with whose turn it is.
 pub enum Overlay {
     Menu { selected: usize },
-    Board { turn: usize, breath: f32 },
+    Board { turn: usize, breath: f32, keys: BoardKeys },
+}
+
+/// What the keybar offers right now. The board's keys change with the turn, so
+/// the bar is built from state rather than hard-coded.
+#[derive(Clone, Copy)]
+pub enum BoardKeys {
+    /// The player has a roll available.
+    Roll,
+    /// Already rolled; the turn has to be ended.
+    Rolled,
+    /// In jail — space opens the escape options instead of rolling.
+    Jailed,
+    /// The setup screen, which has no turn at all.
+    Setup,
 }
 
 /// 11x11 grid; only the outer ring holds the 40 spaces.
@@ -38,6 +53,10 @@ const CHANCE_ORANGE: Color = Color::Rgb(0xF7, 0x94, 0x1D);
 const CHEST_GOLD: Color = Color::Rgb(0xC8, 0x96, 0x28);
 /// Darker green the highlighted cell breathes toward.
 const BOARD_BG_DARK: Color = Color::Rgb(0x8F, 0xA1, 0x91);
+/// Text drawn straight onto the board: near-black green for labels, a muted
+/// version for key hints, so the keybar reads as chrome instead of a banner.
+const BOARD_INK: Color = Color::Rgb(0x2F, 0x3E, 0x35);
+const BOARD_INK_SOFT: Color = Color::Rgb(0x6B, 0x7D, 0x70);
 
 /// Blend between the darker and normal board green by `f` (0..1).
 fn breathe(f: f32) -> Color {
@@ -58,6 +77,14 @@ impl<'a> Map<'a> {
     pub fn new(board: &'a [Space], players: &'a [Player], overlay: Overlay) -> Self {
         Self { board, players, overlay }
     }
+
+    /// Which hotkeys the board should advertise right now.
+    fn keys(&self) -> BoardKeys {
+        match self.overlay {
+            Overlay::Board { keys, .. } => keys,
+            Overlay::Menu { .. } => BoardKeys::Setup,
+        }
+    }
 }
 
 impl Widget for Map<'_> {
@@ -65,22 +92,34 @@ impl Widget for Map<'_> {
         // Scale cells to fill the terminal, never below the minimum. The caller
         // guarantees the area is at least BOARD_W x BOARD_H.
         let cell_w = (area.width / SIZE as u16).max(MIN_CELL_WIDTH);
-        let cell_h = (area.height / SIZE as u16).max(MIN_CELL_HEIGHT);
+        let cell_h = (area.height.saturating_sub(1) / SIZE as u16).max(MIN_CELL_HEIGHT);
         let board_w = cell_w * SIZE as u16;
         let board_h = cell_h * SIZE as u16;
 
         // Center the scaled board; leftover (area % SIZE) becomes a thin margin.
+        // One row below it carries the hotkey line as the board's bottom edge,
+        // dropped entirely if the terminal is too short to spare it.
+        let hint_h = u16::from(area.height > board_h);
         let [area] =
             Layout::horizontal([Constraint::Length(board_w)]).flex(Flex::Center).areas(area);
-        let [area] = Layout::vertical([Constraint::Length(board_h)]).flex(Flex::Center).areas(area);
+        let [area] =
+            Layout::vertical([Constraint::Length(board_h + hint_h)]).flex(Flex::Center).areas(area);
 
-        // Green fills the board, including the hollow center; cells draw on top.
-        Block::new().style(Style::new().bg(BOARD_BG)).render(area, buf);
+        // Green fills the board and the hint row; cells draw on top. The hints
+        // ride the block's bottom border, so they need no layout of their own.
+        Block::new()
+            .title_bottom(Line::from(board_hints(self.keys())).centered())
+            .style(Style::new().bg(BOARD_BG))
+            .render(area, buf);
+        let [area, _] =
+            Layout::vertical([Constraint::Length(board_h), Constraint::Length(hint_h)]).areas(area);
 
         // The current player's cell breathes between board green and a darker
         // green; everything else uses the flat board green.
         let breathing = match self.overlay {
-            Overlay::Board { turn, breath } => self.players.get(turn).map(|p| (p.position, breath)),
+            Overlay::Board { turn, breath, .. } => {
+                self.players.get(turn).map(|p| (p.position, breath))
+            }
             Overlay::Menu { .. } => None,
         };
 
@@ -165,17 +204,15 @@ fn render_center(
             // the keybar and card slots. The setup screen has no players, so it
             // collapses to nothing.
             let panel_h = if players.is_empty() { 0 } else { players.len() as u16 + 2 };
-            let [_, panel, keys, cards] = Layout::vertical([
+            let [_, panel, cards] = Layout::vertical([
                 Constraint::Min(0),
                 Constraint::Length(panel_h),
-                Constraint::Length(1),
                 Constraint::Length(8),
             ])
             .areas(area);
             if !players.is_empty() {
                 render_panel(panel, players, board, turn, buf);
             }
-            render_keybar(keys, turn, buf);
 
             let [chest, chance] =
                 Layout::horizontal([Constraint::Ratio(1, 2), Constraint::Ratio(1, 2)]).areas(cards);
@@ -191,7 +228,7 @@ fn render_panel(area: Rect, players: &[Player], board: &[Space], turn: usize, bu
     let area = centered_rect(area, 40, area.height.min(players.len() as u16 + 2));
     let block = Block::bordered()
         .title_top(Line::from(" Players ").centered())
-        .style(Style::new().bg(Color::Black).fg(Color::White));
+        .style(Style::new().bg(BOARD_BG).fg(BOARD_INK));
     let inner = block.inner(area);
     Clear.render(area, buf);
     block.render(area, buf);
@@ -211,7 +248,7 @@ fn render_panel(area: Rect, players: &[Player], board: &[Space], turn: usize, bu
             let text = format!(" {} P{}  ${}  {owned} props{tag} ", p.piece.icon(), i + 1, p.money);
             let line = Line::from(text);
             if p.bankrupt {
-                line.style(Style::new().fg(Color::DarkGray))
+                line.style(Style::new().fg(BOARD_INK_SOFT))
             } else if i == turn {
                 line.reversed()
             } else {
@@ -222,12 +259,37 @@ fn render_panel(area: Rect, players: &[Player], board: &[Space], turn: usize, bu
     Paragraph::new(lines).render(inner, buf);
 }
 
-/// Thin keybind bar showing whose turn it is and the global keys.
-fn render_keybar(area: Rect, turn: usize, buf: &mut Buffer) {
-    let text = format!("Player {}'s turn   ·   m Menu   ·   Space Roll   ·   q Quit", turn + 1);
-    Paragraph::new(Line::from(text).centered())
-        .style(Style::new().bg(TITLE_RED).fg(Color::White).bold())
-        .render(area, buf);
+/// The board's bottom-border hint line: every turn action with its hotkey
+/// letter highlighted inside the word, then Quit. Built from the `ACTIONS`
+/// table so it can never drift from the keys that actually work.
+fn board_hints(keys: BoardKeys) -> Vec<Span<'static>> {
+    let key = Style::new().fg(BOARD_INK).bold().underlined();
+    let soft = Style::new().fg(BOARD_INK_SOFT);
+    let lead = Style::new().fg(BOARD_INK).bold();
+
+    // Setup has no turn actions; its keys are arrows, so they can't be
+    // mnemonics — show the glyph then the label, same order as the popups.
+    if let BoardKeys::Setup = keys {
+        let mut spans = vec![Span::styled(" ", soft)];
+        for (glyph, label) in
+            [("↑↓", "Move"), ("←→", "Change"), ("Enter", "Start"), ("Esc", "Back")]
+        {
+            spans.push(Span::styled(glyph, key));
+            spans.push(Span::styled(format!(" {label}   "), soft));
+        }
+        return spans;
+    }
+
+    let rolled = matches!(keys, BoardKeys::Rolled);
+    let mut spans = vec![Span::styled(" ", soft)];
+    for (action, label, hotkey) in action::hotkeys() {
+        let rest = if action::is_primary(action, rolled) { lead } else { soft };
+        spans.extend(mnemonic(label, hotkey, key, rest));
+        spans.push(Span::styled("   ", soft));
+    }
+    spans.extend(mnemonic("Quit", 'q', key, soft));
+    spans.push(Span::styled(" ", soft));
+    spans
 }
 
 /// Red menu bar with the main-menu options; the selected row is highlighted.
@@ -236,7 +298,8 @@ fn render_menu_bar(area: Rect, selected: usize, buf: &mut Buffer) {
     let block = Block::bordered().style(Style::new().bg(TITLE_RED).fg(Color::White).bold());
     let inner = block.inner(area);
     block.render(area, buf);
-    Paragraph::new(selectable_lines(&OPTIONS, selected)).render(inner, buf);
+    Paragraph::new(selectable_lines(&OPTIONS, selected, Align::Center, inner.width))
+        .render(inner, buf);
 }
 
 /// Width of the big "MONOPOLY" title: 8 glyphs * 8 pixel columns.
@@ -417,7 +480,9 @@ fn detail_line(space: &Space, owner_icon: Option<&str>) -> String {
 mod tests {
     use super::*;
     use crate::board::board;
+    use crate::player::Piece;
     use crate::space::ColorGroup;
+    use ratatui::style::Modifier;
 
     const RING: usize = SIZE;
 
@@ -482,6 +547,94 @@ mod tests {
         assert_eq!(detail_line(&space, None), "$400");
         space.set_owner(Some(0));
         assert_eq!(detail_line(&space, Some("X")), "P1 X");
+    }
+
+    /// The board's bottom-border hint line as plain text.
+    fn keybar(keys: BoardKeys) -> String {
+        board_hints(keys).into_iter().map(|s| s.content.into_owned()).collect()
+    }
+
+    #[test]
+    fn the_hint_line_lists_every_action_and_quit() {
+        let bar = keybar(BoardKeys::Roll);
+        for (_, label, _) in action::hotkeys() {
+            assert!(bar.contains(label), "{label} missing from the board hints");
+        }
+        assert!(bar.contains("Quit"));
+    }
+
+    #[test]
+    fn each_hotkey_letter_is_highlighted_in_its_word() {
+        let key = Style::new().fg(BOARD_INK).bold().underlined();
+        let lit: Vec<String> = board_hints(BoardKeys::Roll)
+            .into_iter()
+            .filter(|s| s.style == key)
+            .map(|s| s.content.into_owned())
+            .collect();
+        let expected: Vec<String> = action::hotkeys()
+            .map(|(_, _, k)| k.to_uppercase().to_string())
+            .chain(["Q".into()])
+            .collect();
+        assert_eq!(lit, expected);
+    }
+
+    #[test]
+    fn the_standings_panel_sits_on_the_board_not_a_dark_box() {
+        let players = vec![Player::new(Piece::Car, 1500), Player::new(Piece::Dog, 1200)];
+        let mut buf = Buffer::empty(Rect::new(0, 0, 44, 4));
+        render_panel(Rect::new(0, 0, 44, 4), &players, &board(), 0, &mut buf);
+
+        let border = &buf[(2, 0)];
+        assert_eq!(border.bg, BOARD_BG, "the panel must blend into the board");
+        assert!(border.symbol() != " ", "but it keeps its border");
+        assert!(
+            (0..44).all(|x| (0..4).all(|y| buf[(x, y)].bg != Color::Black)),
+            "no dark box anywhere in the panel"
+        );
+    }
+
+    #[test]
+    fn the_current_player_is_still_highlighted() {
+        let players = vec![Player::new(Piece::Car, 1500), Player::new(Piece::Dog, 1200)];
+        let mut buf = Buffer::empty(Rect::new(0, 0, 44, 4));
+        render_panel(Rect::new(0, 0, 44, 4), &players, &board(), 0, &mut buf);
+        let reversed = |y: u16| buf[(4, y)].modifier.contains(Modifier::REVERSED);
+        assert!(reversed(1), "player 1 is up");
+        assert!(!reversed(2));
+    }
+
+    #[test]
+    fn the_hint_line_never_mentions_jail() {
+        assert!(!keybar(BoardKeys::Jailed).contains("ail"), "the standings panel says so");
+    }
+
+    #[test]
+    fn the_setup_screen_shows_its_own_keys() {
+        let bar = keybar(BoardKeys::Setup);
+        assert!(bar.contains("Start"));
+        assert!(!bar.contains("Mortgages"), "no turn actions before the game starts");
+    }
+
+    #[test]
+    fn arrow_hints_name_both_directions() {
+        let bar = keybar(BoardKeys::Setup);
+        assert!(bar.contains("↑↓"), "the cursor moves both ways");
+        assert!(bar.contains("←→"), "values change both ways");
+        assert!(!bar.contains('⏎'), "spell Enter out, as every other hint does");
+    }
+
+    #[test]
+    fn the_primary_action_is_emphasised_and_swaps_after_a_roll() {
+        let lead = Style::new().fg(BOARD_INK).bold();
+        let emphasised = |keys: BoardKeys| -> Vec<String> {
+            board_hints(keys)
+                .into_iter()
+                .filter(|s| s.style == lead && s.content.trim().len() > 1)
+                .map(|s| s.content.into_owned())
+                .collect()
+        };
+        assert_eq!(emphasised(BoardKeys::Roll), vec!["oll Dice"]);
+        assert_eq!(emphasised(BoardKeys::Rolled), vec!["nd Turn"]);
     }
 
     #[test]

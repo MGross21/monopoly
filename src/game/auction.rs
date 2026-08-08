@@ -6,8 +6,13 @@ use ratatui::Frame;
 use ratatui_notifications::Level;
 
 use super::{Game, Modal};
+use crate::keys;
 
 const STEP: u32 = 10;
+
+pub(super) fn auction_keys() -> String {
+    keys!("b" => "bid", "p" => "pass", "esc" => "cancel")
+}
 
 /// One property up for auction. Players in `active` take turns bidding up by
 /// `STEP` or passing; the last standing high bidder wins.
@@ -109,9 +114,8 @@ impl Game {
             format!("Property: {}", self.board[auc.pos].name()),
             high,
             format!("Player {}'s turn", cur + 1),
-            format!("[b] bid +${STEP}   [p] pass   [esc] cancel"),
         ];
-        crate::ui::info_popup(frame, " Auction ", &lines);
+        crate::ui::info_popup(frame, "Auction", &lines, &auction_keys());
     }
 }
 
