@@ -28,12 +28,13 @@ impl Game {
         }
         let name = self.board[pos].name().to_string();
         self.notify(format!("{name} goes to auction"), Level::Info);
-        self.modal = Modal::Auction(Auction { pos, active, turn: 0, high_bid: 0, high_bidder: None });
+        self.modal =
+            Modal::Auction(Auction { pos, active, turn: 0, high_bid: 0, high_bidder: None });
     }
 
     /// Handle one auction key press. Returns `true` to keep the auction open.
     pub(super) fn auction_input(&mut self, auc: &mut Auction, key: KeyCode) -> bool {
-        match key {
+        let open = match key {
             KeyCode::Char('b') => self.auction_bid(auc),
             KeyCode::Char('p') => self.auction_pass(auc),
             KeyCode::Esc => {
@@ -41,7 +42,11 @@ impl Game {
                 false
             }
             _ => true,
+        };
+        if !open {
+            self.run_pending(); // a bankrupt estate may have more lots to sell
         }
+        open
     }
 
     fn auction_bid(&mut self, auc: &mut Auction) -> bool {
@@ -87,7 +92,10 @@ impl Game {
             self.players[winner].money -= auc.high_bid;
             self.board[auc.pos].set_owner(Some(winner));
             let name = self.board[auc.pos].name().to_string();
-            self.notify(format!("Player {} won {name} for ${}", winner + 1, auc.high_bid), Level::Info);
+            self.notify(
+                format!("Player {} won {name} for ${}", winner + 1, auc.high_bid),
+                Level::Info,
+            );
         }
     }
 

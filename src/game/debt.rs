@@ -114,12 +114,10 @@ impl Game {
     /// Cash plus everything the estate could be liquidated for: mortgage value
     /// on unmortgaged holdings, half the build cost on every house.
     fn net_worth(&self, who: usize) -> u32 {
-        self.board
-            .iter()
-            .filter(|s| s.owner() == Some(who))
+        self.estate(who)
             .map(|s| {
-                let mortgage = if s.is_mortgaged() { 0 } else { s.price().unwrap_or(0) / 2 };
-                mortgage + u32::from(s.houses()) * (s.house_cost() / 2)
+                let mortgage = if s.is_mortgaged() { 0 } else { s.mortgage_value() };
+                mortgage + u32::from(s.houses()) * s.house_refund()
             })
             .sum::<u32>()
             + self.players[who].money
@@ -139,6 +137,7 @@ impl Game {
                 self.settle(debt.who, left, &debt.payee);
                 self.bankrupt(debt.who, creditor);
                 self.settle_if_bankrupt(debt.who);
+                self.run_pending();
                 return false;
             }
             _ => {}
@@ -150,6 +149,7 @@ impl Game {
         if let Some(steps) = debt.then_advance {
             self.advance(debt.who, steps);
         }
+        self.run_pending();
         false
     }
 
@@ -165,10 +165,10 @@ impl Game {
             .iter()
             .map(|&i| {
                 let s = &self.board[i];
-                let refund = s.house_cost() / 2;
+                let refund = s.house_refund();
                 match s.houses() {
                     0 if s.is_mortgaged() => format!("{}  [mortgaged]", s.name()),
-                    0 => format!("{}  [mortgage +${}]", s.name(), s.price().unwrap_or(0) / 2),
+                    0 => format!("{}  [mortgage +${}]", s.name(), s.mortgage_value()),
                     HOTEL => format!("{}  hotel  [sell +${refund}]", s.name()),
                     h => format!("{}  {h} house  [sell +${refund}]", s.name()),
                 }

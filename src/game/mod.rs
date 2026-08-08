@@ -21,6 +21,8 @@ mod cards;
 mod debt;
 mod estate;
 mod jail;
+mod rent;
+mod save;
 #[cfg(test)]
 mod testkit;
 #[cfg(test)]
@@ -29,18 +31,17 @@ mod trade;
 
 use std::collections::VecDeque;
 
-use serde::{Deserialize, Serialize};
-
 use auction::Auction;
 use cards::{Card, CardDraw, Deck, fresh_decks};
 use debt::{Debt, Payee};
 use estate::EstateMenu;
 use jail::JailMenu;
+use rent::RentRule;
 use trade::Trade;
 
 use crate::board::board;
 use crate::player::Player;
-use crate::space::{ColorGroup, Space};
+use crate::space::Space;
 use crate::ui::dice::{self, Roll};
 use crate::ui::map::Overlay;
 use crate::ui::{Confirm, ConfirmResult};
@@ -49,28 +50,12 @@ use action::{ActionMenu, TurnAction, action_for_hotkey};
 /// Spaces on the board, indexed clockwise from GO at 0.
 const BOARD_LEN: usize = 40;
 const GO_SALARY: u32 = 200;
-const RAILROAD_BASE_RENT: u32 = 25;
 /// House count that represents a hotel.
 const HOTEL: u8 = 5;
-
-/// Where a game is saved to / loaded from: the platform per-user data dir, e.g.
-/// `~/.local/share/monopoly/save.json` on Linux. `None` if no such dir exists.
-fn save_path() -> Option<std::path::PathBuf> {
-    dirs::data_dir().map(|dir| dir.join("monopoly").join("save.json"))
-}
-
-/// The persistent slice of a game. Transient UI state (the active popup,
-/// notifications, the clock) and the card decks are not saved — decks are
-/// reshuffled on load since their text is `&'static`.
-#[derive(Serialize, Deserialize)]
-struct Save {
-    players: Vec<Player>,
-    board: Vec<Space>,
-    current: usize,
-    doubles: u8,
-    can_roll: bool,
-    has_rolled: bool,
-}
+/// The bank's building stock. Running out is part of the game: no one can build
+/// until someone else sells.
+const TOTAL_HOUSES: u8 = 32;
+const TOTAL_HOTELS: u8 = 12;
 
 pub struct Game {
     pub players: Vec<Player>,
@@ -85,6 +70,18 @@ pub struct Game {
     done: bool,       // game over acknowledged; main returns to the menu
     chance: VecDeque<Card>,
     chest: VecDeque<Card>,
+    houses_left: u8,
+    hotels_left: u8,
+    pending: VecDeque<Pending>,
+}
+
+/// A prompt waiting for the screen to clear. Only one popup shows at a time, so
+/// work that would need a second one queues up here instead.
+enum Pending {
+    /// Auction this board index off for the bank.
+    Auction(usize),
+    /// Bill a player, which may open a liquidation popup of its own.
+    Charge { who: usize, amount: u32, payee: Payee },
 }
 
 /// The single popup the game is currently showing, if any. Holding these in one
@@ -110,6 +107,21 @@ enum Modal {
 struct InfoBox {
     title: String,
     lines: Vec<String>,
+}
+
+/// Feed a key to a popup that needs `&mut self` while it is open.
+///
+/// The popup is taken *out* of `self.modal` first, so its `*_input` method gets
+/// the whole game — and can open a different popup, which then survives because
+/// we only put this one back when the handler asks to stay open.
+macro_rules! drive {
+    ($self:ident, $variant:ident, $input:ident, $key:ident) => {{
+        if let Modal::$variant(mut state) = std::mem::replace(&mut $self.modal, Modal::None)
+            && $self.$input(&mut state, $key)
+        {
+            $self.modal = Modal::$variant(state);
+        }
+    }};
 }
 
 impl Game {
@@ -141,6 +153,9 @@ impl Game {
             done: false,
             chance,
             chest,
+            houses_left: TOTAL_HOUSES,
+            hotels_left: TOTAL_HOTELS,
+            pending: VecDeque::new(),
         };
         game.notify(format!("Player {} wins the roll-off", first + 1), Level::Info);
         game.notify(format!("Player {}'s turn", first + 1), Level::Info);
@@ -162,64 +177,8 @@ impl Game {
             || matches!(&self.modal, Modal::Roll(roll) if roll.animating())
     }
 
-    /// Build a game from saved state, with fresh transient UI and reshuffled
-    /// decks.
-    fn from_save(save: Save) -> Self {
-        let (chance, chest) = fresh_decks();
-        Self {
-            players: save.players,
-            board: save.board,
-            current: save.current,
-            modal: Modal::None,
-            notes: Notifications::new().max_concurrent(Some(4)),
-            doubles: save.doubles,
-            can_roll: save.can_roll,
-            has_rolled: save.has_rolled,
-            clock: Duration::ZERO,
-            done: false,
-            chance,
-            chest,
-        }
-    }
-
-    /// Load the saved game, or `None` if there's no save or it can't be read.
-    pub fn load() -> Option<Self> {
-        let data = std::fs::read_to_string(save_path()?).ok()?;
-        let save: Save = serde_json::from_str(&data).ok()?;
-        Some(Self::from_save(save))
-    }
-
-    /// Write the persistent state to the save path, creating the directory if
-    /// needed, and toast success or failure.
-    fn save_game(&mut self) {
-        let save = Save {
-            players: self.players.clone(),
-            board: self.board.clone(),
-            current: self.current,
-            doubles: self.doubles,
-            can_roll: self.can_roll,
-            has_rolled: self.has_rolled,
-        };
-        let result = (|| -> Result<std::path::PathBuf, String> {
-            let path = save_path().ok_or("no data directory")?;
-            if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-            }
-            let json = serde_json::to_string_pretty(&save).map_err(|e| e.to_string())?;
-            std::fs::write(&path, json).map_err(|e| e.to_string())?;
-            Ok(path)
-        })();
-        match result {
-            Ok(path) => self.notify(format!("Game saved to {}", path.display()), Level::Info),
-            Err(e) => self.notify(format!("Save failed: {e}"), Level::Error),
-        }
-    }
-
     pub fn overlay(&self) -> Overlay {
-        Overlay::Board {
-            turn: self.current,
-            breath: self.breath(),
-        }
+        Overlay::Board { turn: self.current, breath: self.breath() }
     }
 
     /// Breathing brightness 0..1, a slow sine over the game clock.
@@ -292,31 +251,13 @@ impl Game {
                 _ => {}
             },
 
-            Modal::Jail(_) => {
-                if let Modal::Jail(mut menu) = std::mem::replace(&mut self.modal, Modal::None)
-                    && self.jail_input(&mut menu, key)
-                {
-                    self.modal = Modal::Jail(menu);
-                }
-            }
-
-            Modal::Estate(_) => {
-                if let Modal::Estate(mut menu) = std::mem::replace(&mut self.modal, Modal::None)
-                    && self.estate_input(&mut menu, key)
-                {
-                    self.modal = Modal::Estate(menu);
-                }
-            }
-
+            Modal::Jail(_) => drive!(self, Jail, jail_input, key),
+            Modal::Estate(_) => drive!(self, Estate, estate_input, key),
             // Forced liquidation; has no cancel key, so it stays until the debt
             // is paid off or the player folds.
-            Modal::Debt(_) => {
-                if let Modal::Debt(mut d) = std::mem::replace(&mut self.modal, Modal::None)
-                    && self.debt_input(&mut d, key)
-                {
-                    self.modal = Modal::Debt(d);
-                }
-            }
+            Modal::Debt(_) => drive!(self, Debt, debt_input, key),
+            Modal::Auction(_) => drive!(self, Auction, auction_input, key),
+            Modal::Trade(_) => drive!(self, Trade, trade_input, key),
 
             // Buy-or-auction prompt for the property just landed on.
             Modal::Buy { confirm, pos } => {
@@ -331,25 +272,6 @@ impl Game {
                         self.modal = Modal::None;
                         self.start_auction(pos);
                     }
-                }
-            }
-
-            // Auction bidding. Take the auction out so the bid/pass handlers get
-            // full access to `self`; put it back unless the auction has ended.
-            Modal::Auction(_) => {
-                if let Modal::Auction(mut auc) = std::mem::replace(&mut self.modal, Modal::None)
-                    && self.auction_input(&mut auc, key)
-                {
-                    self.modal = Modal::Auction(auc);
-                }
-            }
-
-            // Trade builder; same take-out-and-replace pattern as the auction.
-            Modal::Trade(_) => {
-                if let Modal::Trade(mut t) = std::mem::replace(&mut self.modal, Modal::None)
-                    && self.trade_input(&mut t, key)
-                {
-                    self.modal = Modal::Trade(t);
                 }
             }
 
@@ -424,6 +346,12 @@ impl Game {
     /// Move `who` forward `steps`, paying GO salary on a pass and resolving the
     /// landing. Shared by normal and out-of-jail moves.
     fn advance(&mut self, who: usize, steps: usize) {
+        self.advance_under(who, steps, RentRule::Normal);
+    }
+
+    /// `advance` with the rent `rule` the landing is charged under — the
+    /// "advance to the nearest …" cards bill more than the printed rate.
+    fn advance_under(&mut self, who: usize, steps: usize, rule: RentRule) {
         let old = self.players[who].position;
         let passed_go = old + steps >= BOARD_LEN;
         let new = (old + steps) % BOARD_LEN;
@@ -434,7 +362,7 @@ impl Game {
         }
         let name = self.board[new].name().to_string();
         self.notify(format!("Player {} landed on {name}", who + 1), Level::Info);
-        self.resolve_landing(new, steps);
+        self.resolve_landing(new, steps, rule);
     }
 
     /// Apply a finished dice roll: move, pass GO, resolve the landing, doubles.
@@ -494,7 +422,7 @@ impl Game {
     }
 
     /// React to the space the current player landed on.
-    fn resolve_landing(&mut self, pos: usize, total: usize) {
+    fn resolve_landing(&mut self, pos: usize, total: usize, rule: RentRule) {
         match self.landing(pos) {
             Landing::Tax(amount) => self.pay_bank(amount),
             Landing::Jail => self.send_to_jail(),
@@ -506,7 +434,7 @@ impl Game {
                 self.modal = Modal::Buy { confirm: Confirm::new(), pos };
             }
             Landing::Owned(owner) => {
-                let rent = self.rent(pos, owner, total);
+                let rent = self.rent(pos, owner, total, rule);
                 self.pay_player(owner, rent);
             }
             Landing::Nothing => {}
@@ -562,18 +490,40 @@ impl Game {
         if !self.players[who].bankrupt {
             return false;
         }
-        if !matches!(self.modal, Modal::GameOver(_)) {
+        // Only the player whose turn it is hands it off — a card can bankrupt a
+        // bystander without ending the drawer's turn.
+        if who == self.current && !matches!(self.modal, Modal::GameOver(_)) {
             self.end_turn();
         }
         true
     }
 
+    /// Work queued up behind the popup that's currently open — a bankrupt
+    /// estate's auctions, or the rest of a "collect from every player" card.
+    fn queue(&mut self, work: Pending) {
+        self.pending.push_back(work);
+    }
+
+    /// Start the next queued item, if nothing is on screen. Each popup calls this
+    /// as it closes, so the queue drains one prompt at a time.
+    fn run_pending(&mut self) {
+        while matches!(self.modal, Modal::None) {
+            match self.pending.pop_front() {
+                Some(Pending::Auction(pos)) => self.start_auction(pos),
+                Some(Pending::Charge { who, amount, payee }) => {
+                    if !self.players[who].bankrupt {
+                        self.charge(who, amount, payee);
+                    }
+                }
+                None => return,
+            }
+        }
+    }
+
     fn show_inventory(&mut self) {
         let me = self.current;
         let lines: Vec<String> = self
-            .board
-            .iter()
-            .filter(|s| s.owner() == Some(me))
+            .estate(me)
             .map(|s| match s.price() {
                 Some(price) => format!("{}  (${price})", s.name()),
                 None => s.name().to_string(),
@@ -600,20 +550,60 @@ impl Game {
         (0..self.board.len()).filter(|&i| self.board[i].owner() == Some(who)).collect()
     }
 
+    /// Every space owned by `who`, in board order.
+    fn estate(&self, who: usize) -> impl Iterator<Item = &Space> {
+        self.board.iter().filter(move |s| s.owner() == Some(who))
+    }
+
     /// Eliminate `who`: hand their estate to `creditor` (a player) or back to the
     /// bank, then check whether only one player remains.
+    ///
+    /// A creditor inherits the deeds as they stand and owes 10% interest on every
+    /// mortgaged one. The bank instead auctions each deed off, one at a time.
     fn bankrupt(&mut self, who: usize, creditor: Option<usize>) {
         self.players[who].bankrupt = true;
-        for space in &mut self.board {
-            if space.owner() == Some(who) {
-                space.set_owner(creditor);
-                if creditor.is_none() {
-                    space.reset_buildings(); // back to the bank's stock
+        let mut interest = 0;
+        for idx in self.holdings(who) {
+            match creditor {
+                Some(to) => {
+                    if self.board[idx].is_mortgaged() {
+                        interest += self.board[idx].mortgage_value() / 10;
+                    }
+                    self.board[idx].set_owner(Some(to));
+                }
+                None => {
+                    self.reclaim_buildings(idx);
+                    self.board[idx].set_owner(None);
+                    self.board[idx].reset_buildings();
+                    self.queue(Pending::Auction(idx));
                 }
             }
         }
         self.notify(format!("Player {} is out of the game", who + 1), Level::Error);
         self.check_win();
+        if matches!(self.modal, Modal::GameOver(_)) {
+            self.pending.clear();
+            return;
+        }
+        if let Some(to) = creditor
+            && interest > 0
+        {
+            self.notify(
+                format!("Player {} owes ${interest} interest on the mortgages", to + 1),
+                Level::Warn,
+            );
+            self.queue(Pending::Charge { who: to, amount: interest, payee: Payee::Bank });
+        }
+        self.run_pending();
+    }
+
+    /// Return the buildings on `idx` to the bank's stock.
+    fn reclaim_buildings(&mut self, idx: usize) {
+        match self.board[idx].houses() {
+            0 => {}
+            HOTEL => self.hotels_left += 1,
+            n => self.houses_left += n,
+        }
     }
 
     /// If only one player is left standing, end the game.
@@ -623,63 +613,6 @@ impl Game {
             self.notify(format!("Player {} wins!", winner + 1), Level::Info);
             self.modal = Modal::GameOver(winner);
         }
-    }
-
-    /// Rent owed for the space at `pos`, owned by `owner`. A mortgaged space
-    /// collects nothing.
-    fn rent(&self, pos: usize, owner: usize, total: usize) -> u32 {
-        match &self.board[pos] {
-            Space::Property(p) => {
-                if p.base.mortgaged {
-                    return 0;
-                }
-                // A full color group doubles the base rent, but only while the
-                // group is undeveloped; once houses go up the table takes over.
-                if p.houses == 0 && self.owns_full_group(owner, p.group) {
-                    p.current_rent() * 2
-                } else {
-                    p.current_rent()
-                }
-            }
-            Space::Railroad(o) if o.mortgaged => 0,
-            Space::Railroad(_) => RAILROAD_BASE_RENT * self.count_kind(owner, Kind::Railroad),
-            Space::Utility(o) if o.mortgaged => 0,
-            Space::Utility(_) => {
-                let multiplier = if self.count_kind(owner, Kind::Utility) == 2 { 10 } else { 4 };
-                total as u32 * multiplier
-            }
-            _ => 0,
-        }
-    }
-
-    /// True when `owner` holds every street in `group`, the precondition for
-    /// building and for doubled rent.
-    fn owns_full_group(&self, owner: usize, group: ColorGroup) -> bool {
-        let mut total = 0;
-        let mut mine = 0;
-        for space in &self.board {
-            if let Space::Property(p) = space
-                && p.group == group
-            {
-                total += 1;
-                if p.base.owner == Some(owner) {
-                    mine += 1;
-                }
-            }
-        }
-        total > 0 && mine == total
-    }
-
-    /// How many railroads/utilities `owner` holds.
-    fn count_kind(&self, owner: usize, kind: Kind) -> u32 {
-        self.board
-            .iter()
-            .filter(|s| s.owner() == Some(owner))
-            .filter(|s| match kind {
-                Kind::Railroad => matches!(s, Space::Railroad(_)),
-                Kind::Utility => matches!(s, Space::Utility(_)),
-            })
-            .count() as u32
     }
 
     fn notify(&mut self, message: impl Into<String>, level: Level) {
@@ -738,12 +671,6 @@ impl Game {
         let area = frame.area();
         self.notes.render(frame, area);
     }
-}
-
-#[derive(Clone, Copy)]
-enum Kind {
-    Railroad,
-    Utility,
 }
 
 /// The consequence of landing on a space, free of any borrow on the board.

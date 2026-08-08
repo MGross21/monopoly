@@ -59,7 +59,8 @@ impl Setup {
         match self.cursor.selected {
             0 => {
                 let count = (self.player_count as i32 + dir)
-                    .clamp(MIN_PLAYERS as i32, MAX_PLAYERS as i32) as usize;
+                    .clamp(MIN_PLAYERS as i32, MAX_PLAYERS as i32)
+                    as usize;
                 self.set_player_count(count);
             }
             1 => {
@@ -86,11 +87,8 @@ impl Setup {
             if piece == current {
                 return current; // wrapped all the way around, none free
             }
-            let taken = self
-                .pieces
-                .iter()
-                .enumerate()
-                .any(|(j, &other)| j != idx && other == piece);
+            let taken =
+                self.pieces.iter().enumerate().any(|(j, &other)| j != idx && other == piece);
             if !taken {
                 return piece;
             }
@@ -104,19 +102,14 @@ impl Setup {
     }
 
     fn build_players(&self) -> Vec<Player> {
-        self.pieces
-            .iter()
-            .map(|&piece| Player::new(piece, self.starting_money))
-            .collect()
+        self.pieces.iter().map(|&piece| Player::new(piece, self.starting_money)).collect()
     }
 
     pub fn render(&self, frame: &mut Frame) {
         let height = self.field_count() as u16 + 4; // fields + border + hint
         let area = centered_rect(frame.area(), POPUP_WIDTH, height);
 
-        let block = Block::bordered()
-            .title(" New Game ")
-            .style(Style::new().bg(Color::Black));
+        let block = Block::bordered().title(" New Game ").style(Style::new().bg(Color::Black));
         let inner = block.inner(area);
 
         frame.render_widget(Clear, area); // wipe the board behind the popup
@@ -140,11 +133,7 @@ impl Setup {
 
     fn field_line(&self, field: usize, label: &str, value: String) -> Line<'static> {
         let line = Line::from(format!("{label:<9} ‹ {value} ›"));
-        if field == self.cursor.selected {
-            line.reversed()
-        } else {
-            line
-        }
+        if field == self.cursor.selected { line.reversed() } else { line }
     }
 }
 

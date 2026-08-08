@@ -79,7 +79,7 @@ fn run(terminal: &mut DefaultTerminal) -> Result<()> {
         };
         let event = match timeout {
             Some(t) if event::poll(t)? => Some(event::read()?),
-            Some(_) => None,       // timed out, no input this tick
+            Some(_) => None,              // timed out, no input this tick
             None => Some(event::read()?), // idle: block here until a key
         };
 
@@ -108,7 +108,8 @@ fn run(terminal: &mut DefaultTerminal) -> Result<()> {
             }
             continue;
         }
-        let ctrl_c = key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL);
+        let ctrl_c =
+            key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL);
         if key.code == KeyCode::Char('q') || ctrl_c {
             quit = Some(Confirm::new());
             continue;
@@ -135,11 +136,7 @@ fn run(terminal: &mut DefaultTerminal) -> Result<()> {
             }
             App::Playing(g) => {
                 g.handle_key(key.code);
-                if g.is_done() {
-                    Transition::ToMenu
-                } else {
-                    Transition::Stay
-                }
+                if g.is_done() { Transition::ToMenu } else { Transition::Stay }
             }
         };
 
@@ -172,7 +169,11 @@ fn render(frame: &mut Frame, app: &mut App, quit: Option<&Confirm>) {
     let (spaces, players, overlay) = match &*app {
         App::Menu(m) => {
             board_owned = board();
-            (board_owned.as_slice(), empty.as_slice(), Overlay::Menu { selected: m.cursor.selected })
+            (
+                board_owned.as_slice(),
+                empty.as_slice(),
+                Overlay::Menu { selected: m.cursor.selected },
+            )
         }
         App::Setup(_) => {
             board_owned = board();

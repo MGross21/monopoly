@@ -45,12 +45,7 @@ pub struct Ownable {
 
 impl Ownable {
     fn new(name: &str, price: u32) -> Self {
-        Self {
-            name: name.to_string(),
-            price,
-            owner: None,
-            mortgaged: false,
-        }
+        Self { name: name.to_string(), price, owner: None, mortgaged: false }
     }
 }
 
@@ -192,6 +187,22 @@ impl Space {
             Space::Property(p) => p.house_cost,
             _ => 0,
         }
+    }
+
+    /// What the Bank lends against this deed: half the printed price.
+    pub fn mortgage_value(&self) -> u32 {
+        self.price().unwrap_or(0) / 2
+    }
+
+    /// What it costs to lift the mortgage: the value plus 10% interest.
+    pub fn unmortgage_cost(&self) -> u32 {
+        let value = self.mortgage_value();
+        value + value / 10
+    }
+
+    /// What the Bank pays back for one house: half what it cost to build.
+    pub fn house_refund(&self) -> u32 {
+        self.house_cost() / 2
     }
 
     /// Return a space to the bank's stock: clear any houses and the mortgage so

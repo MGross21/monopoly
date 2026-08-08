@@ -10,9 +10,9 @@ use ratatui::{
 
 use tui_big_text::{BigText, PixelSize};
 
-use crate::ui::menu::OPTIONS;
 use crate::player::Player;
 use crate::space::Space;
+use crate::ui::menu::OPTIONS;
 use crate::ui::{centered_rect, selectable_lines};
 
 /// What to draw in the hollow center: the main menu, or the in-game board
@@ -56,11 +56,7 @@ pub struct Map<'a> {
 
 impl<'a> Map<'a> {
     pub fn new(board: &'a [Space], players: &'a [Player], overlay: Overlay) -> Self {
-        Self {
-            board,
-            players,
-            overlay,
-        }
+        Self { board, players, overlay }
     }
 }
 
@@ -74,12 +70,9 @@ impl Widget for Map<'_> {
         let board_h = cell_h * SIZE as u16;
 
         // Center the scaled board; leftover (area % SIZE) becomes a thin margin.
-        let [area] = Layout::horizontal([Constraint::Length(board_w)])
-            .flex(Flex::Center)
-            .areas(area);
-        let [area] = Layout::vertical([Constraint::Length(board_h)])
-            .flex(Flex::Center)
-            .areas(area);
+        let [area] =
+            Layout::horizontal([Constraint::Length(board_w)]).flex(Flex::Center).areas(area);
+        let [area] = Layout::vertical([Constraint::Length(board_h)]).flex(Flex::Center).areas(area);
 
         // Green fills the board, including the hollow center; cells draw on top.
         Block::new().style(Style::new().bg(BOARD_BG)).render(area, buf);
@@ -114,12 +107,8 @@ impl Widget for Map<'_> {
         }
 
         // Hollow center: inset the board by one cell on every side.
-        let center = Rect::new(
-            area.x + cell_w,
-            area.y + cell_h,
-            board_w - 2 * cell_w,
-            board_h - 2 * cell_h,
-        );
+        let center =
+            Rect::new(area.x + cell_w, area.y + cell_h, board_w - 2 * cell_w, board_h - 2 * cell_h);
         render_center(center, &self.overlay, self.players, self.board, buf);
     }
 }
@@ -128,12 +117,8 @@ impl Map<'_> {
     /// Draws the tokens of any players standing on `index`, wrapped across the
     /// cell's bottom rows so a crowded space doesn't overflow one line.
     fn render_tokens(&self, index: usize, cell: Rect, buf: &mut Buffer) {
-        let icons: Vec<&str> = self
-            .players
-            .iter()
-            .filter(|p| p.position == index)
-            .map(|p| p.piece.icon())
-            .collect();
+        let icons: Vec<&str> =
+            self.players.iter().filter(|p| p.position == index).map(|p| p.piece.icon()).collect();
         if icons.is_empty() {
             return;
         }
@@ -158,14 +143,21 @@ impl Map<'_> {
 
 /// Draws the board interior. The main menu shows the title + menu bar; in-game
 /// shows the title, a thin keybind bar, then the two card slots.
-fn render_center(area: Rect, overlay: &Overlay, players: &[Player], board: &[Space], buf: &mut Buffer) {
+fn render_center(
+    area: Rect,
+    overlay: &Overlay,
+    players: &[Player],
+    board: &[Space],
+    buf: &mut Buffer,
+) {
     // Title is vertically centered in the whole center; menus/cards sit at the
     // bottom (drawn after, and the title only paints its glyph cells anyway).
     render_title(area, buf);
 
     match *overlay {
         Overlay::Menu { selected } => {
-            let [_, bar] = Layout::vertical([Constraint::Min(0), Constraint::Length(4)]).areas(area);
+            let [_, bar] =
+                Layout::vertical([Constraint::Min(0), Constraint::Length(4)]).areas(area);
             render_menu_bar(bar, selected, buf);
         }
         Overlay::Board { turn, .. } => {
@@ -232,10 +224,7 @@ fn render_panel(area: Rect, players: &[Player], board: &[Space], turn: usize, bu
 
 /// Thin keybind bar showing whose turn it is and the global keys.
 fn render_keybar(area: Rect, turn: usize, buf: &mut Buffer) {
-    let text = format!(
-        "Player {}'s turn   ·   m Menu   ·   Space Roll   ·   q Quit",
-        turn + 1
-    );
+    let text = format!("Player {}'s turn   ·   m Menu   ·   Space Roll   ·   q Quit", turn + 1);
     Paragraph::new(Line::from(text).centered())
         .style(Style::new().bg(TITLE_RED).fg(Color::White).bold())
         .render(area, buf);
@@ -269,19 +258,14 @@ pub fn render_warning(area: Rect, buf: &mut Buffer) {
     .style(Style::new().fg(Color::Black).bold());
 
     if body.width >= BIG_TITLE_W && body.height >= 12 {
-        let [title, _, msg] = Layout::vertical([
-            Constraint::Length(8),
-            Constraint::Length(1),
-            Constraint::Length(3),
-        ])
-        .flex(Flex::Center)
-        .areas(body);
+        let [title, _, msg] =
+            Layout::vertical([Constraint::Length(8), Constraint::Length(1), Constraint::Length(3)])
+                .flex(Flex::Center)
+                .areas(body);
         render_title(title, buf);
         message.render(msg, buf);
     } else {
-        let [msg] = Layout::vertical([Constraint::Length(4)])
-            .flex(Flex::Center)
-            .areas(body);
+        let [msg] = Layout::vertical([Constraint::Length(4)]).flex(Flex::Center).areas(body);
         message.render(msg, buf);
     }
 
@@ -301,9 +285,7 @@ fn render_title(area: Rect, buf: &mut Buffer) {
     const TH: u16 = 8; // glyph height
     const MAX_SCALE: u16 = 2;
 
-    let scale = (area.width / TW)
-        .min(area.height / TH)
-        .clamp(1, MAX_SCALE);
+    let scale = (area.width / TW).min(area.height / TH).clamp(1, MAX_SCALE);
 
     // Render the title at base size into a scratch buffer.
     let rect = Rect::new(0, 0, TW, TH);
@@ -350,9 +332,7 @@ fn render_card_slot(area: Rect, label: &str, icon: &str, color: Color, buf: &mut
     let inner = block.inner(area);
     block.render(area, buf);
 
-    let [icon_row] = Layout::vertical([Constraint::Length(1)])
-        .flex(Flex::Center)
-        .areas(inner);
+    let [icon_row] = Layout::vertical([Constraint::Length(1)]).flex(Flex::Center).areas(inner);
     Paragraph::new(Line::from(icon).centered())
         .style(Style::new().fg(color).bold())
         .render(icon_row, buf);
@@ -397,9 +377,7 @@ fn render_space(space: &Space, area: Rect, bg: Color, owner_icon: Option<&str>, 
     let banner = Rect::new(inner.x, inner.y, inner.width, 1);
     match space {
         Space::Property(p) => {
-            Block::new()
-                .style(Style::new().bg(p.group.color()))
-                .render(banner, buf);
+            Block::new().style(Style::new().bg(p.group.color())).render(banner, buf);
         }
         _ => {
             if let Some(icon) = space.icon() {
@@ -499,7 +477,8 @@ mod tests {
 
     #[test]
     fn the_detail_line_shows_the_price_until_it_is_bought() {
-        let mut space = Space::street("Boardwalk", ColorGroup::DarkBlue, 400, [1, 2, 3, 4, 5, 6], 200);
+        let mut space =
+            Space::street("Boardwalk", ColorGroup::DarkBlue, 400, [1, 2, 3, 4, 5, 6], 200);
         assert_eq!(detail_line(&space, None), "$400");
         space.set_owner(Some(0));
         assert_eq!(detail_line(&space, Some("X")), "P1 X");

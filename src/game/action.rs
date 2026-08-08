@@ -1,14 +1,9 @@
 //! The per-turn action menu: the list of things a player can do on their turn,
 //! their labels/hotkeys, and the popup that renders them.
 
-use ratatui::{
-    Frame,
-    style::{Color, Style, Stylize},
-    text::Line,
-    widgets::{Block, Clear, Paragraph},
-};
+use ratatui::{Frame, style::Stylize, text::Line, widgets::Paragraph};
 
-use crate::ui::{Cursor, centered_rect};
+use crate::ui::{Cursor, popup_frame};
 
 #[derive(Clone, Copy)]
 pub enum TurnAction {
@@ -37,10 +32,7 @@ const ACTIONS: [(TurnAction, &str, char); 8] = [
 
 /// The action bound to keyboard key `c`, if any.
 pub fn action_for_hotkey(c: char) -> Option<TurnAction> {
-    ACTIONS
-        .iter()
-        .find(|(_, _, hotkey)| *hotkey == c)
-        .map(|(action, _, _)| *action)
+    ACTIONS.iter().find(|(_, _, hotkey)| *hotkey == c).map(|(action, _, _)| *action)
 }
 
 pub struct ActionMenu {
@@ -49,9 +41,7 @@ pub struct ActionMenu {
 
 impl ActionMenu {
     pub fn new() -> Self {
-        Self {
-            cursor: Cursor::new(ACTIONS.len()),
-        }
+        Self { cursor: Cursor::new(ACTIONS.len()) }
     }
 
     pub fn prev(&mut self) {
@@ -69,13 +59,8 @@ impl ActionMenu {
     pub fn render(&self, frame: &mut Frame, current: usize, money: u32) {
         // A blank row separates "End Turn" (the last action) from the rest.
         let gap = 1u16;
-        let area = centered_rect(frame.area(), 28, ACTIONS.len() as u16 + gap + 2);
-        let block = Block::bordered()
-            .title_top(Line::from(format!(" Player {} — ${money} ", current + 1)).centered())
-            .style(Style::new().bg(Color::Black).fg(Color::White).bold());
-        let inner = block.inner(area);
-        frame.render_widget(Clear, area);
-        frame.render_widget(block, area);
+        let title = format!(" Player {} — ${money} ", current + 1);
+        let inner = popup_frame(frame, &title, 28, ACTIONS.len() as u16 + gap + 2);
 
         let last = ACTIONS.len() - 1;
         let mut lines: Vec<Line> = Vec::new();

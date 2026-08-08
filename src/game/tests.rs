@@ -1,4 +1,4 @@
-//! Tests for the turn loop, movement, rent, and elimination in `game/mod.rs`.
+//! Tests for the turn loop, movement, buying, and elimination in `game/mod.rs`.
 
 use super::testkit::*;
 use super::*;
@@ -106,72 +106,7 @@ fn landing_in_jail_on_doubles_still_ends_the_turn() {
     assert!(!g.can_roll, "no bonus roll out of jail");
 }
 
-// --- rent -------------------------------------------------------------------
-
-#[test]
-fn rent_is_the_printed_base_for_a_lone_street() {
-    let mut g = game(2, 1500);
-    own(&mut g, MEDITERRANEAN, 1);
-    assert_eq!(g.rent(MEDITERRANEAN, 1, 7), 2);
-}
-
-#[test]
-fn a_full_group_doubles_undeveloped_rent() {
-    let mut g = game(2, 1500);
-    own_group(&mut g, ColorGroup::Brown, 1);
-    assert_eq!(g.rent(MEDITERRANEAN, 1, 7), 4);
-}
-
-#[test]
-fn houses_replace_the_doubled_group_rent() {
-    let mut g = game(2, 1500);
-    own_group(&mut g, ColorGroup::Brown, 1);
-    set_houses(&mut g, MEDITERRANEAN, 1);
-    assert_eq!(g.rent(MEDITERRANEAN, 1, 7), 10, "the table takes over, not 2x");
-}
-
-#[test]
-fn a_hotel_charges_the_top_of_the_table() {
-    let mut g = game(2, 1500);
-    own_group(&mut g, ColorGroup::Brown, 1);
-    set_houses(&mut g, MEDITERRANEAN, HOTEL);
-    assert_eq!(g.rent(MEDITERRANEAN, 1, 7), 250);
-}
-
-#[test]
-fn railroad_rent_scales_with_the_number_held() {
-    let mut g = game(2, 1500);
-    own(&mut g, READING_RR, 1);
-    assert_eq!(g.rent(READING_RR, 1, 7), 25);
-    own(&mut g, PENNSYLVANIA_RR, 1);
-    assert_eq!(g.rent(READING_RR, 1, 7), 50);
-    own(&mut g, B_AND_O_RR, 1);
-    own(&mut g, SHORT_LINE, 1);
-    assert_eq!(g.rent(READING_RR, 1, 7), 100);
-}
-
-#[test]
-fn utility_rent_is_four_or_ten_times_the_roll() {
-    let mut g = game(2, 1500);
-    own(&mut g, ELECTRIC_CO, 1);
-    assert_eq!(g.rent(ELECTRIC_CO, 1, 9), 36);
-    own(&mut g, WATER_WORKS, 1);
-    assert_eq!(g.rent(ELECTRIC_CO, 1, 9), 90);
-}
-
-#[test]
-fn a_mortgaged_space_collects_nothing() {
-    let mut g = game(2, 1500);
-    own(&mut g, BOARDWALK, 1);
-    g.board[BOARDWALK].set_mortgaged(true);
-    assert_eq!(g.rent(BOARDWALK, 1, 7), 0);
-    own(&mut g, READING_RR, 1);
-    g.board[READING_RR].set_mortgaged(true);
-    assert_eq!(g.rent(READING_RR, 1, 7), 0);
-    own(&mut g, ELECTRIC_CO, 1);
-    g.board[ELECTRIC_CO].set_mortgaged(true);
-    assert_eq!(g.rent(ELECTRIC_CO, 1, 7), 0);
-}
+// --- rent in play (the tables themselves live in rent.rs) --------------------
 
 #[test]
 fn landing_on_a_rival_street_transfers_the_rent() {
@@ -190,15 +125,6 @@ fn landing_on_your_own_street_costs_nothing() {
     place(&mut g, 0, BOARDWALK - 5);
     g.apply_roll(2, 3);
     assert_eq!(g.players[0].money, 1500);
-}
-
-#[test]
-fn a_full_group_is_only_a_monopoly_when_every_street_is_held() {
-    let mut g = game(2, 1500);
-    own(&mut g, MEDITERRANEAN, 0);
-    assert!(!g.owns_full_group(0, ColorGroup::Brown));
-    own(&mut g, BALTIC, 0);
-    assert!(g.owns_full_group(0, ColorGroup::Brown));
 }
 
 // --- buying and taxes -------------------------------------------------------
@@ -287,6 +213,73 @@ fn bankruptcy_to_the_bank_clears_the_estate() {
 }
 
 #[test]
+fn a_bank_bankruptcy_auctions_the_estate_off() {
+    let mut g = game(3, 1500);
+    own(&mut g, MEDITERRANEAN, 0);
+    own(&mut g, BOARDWALK, 0);
+    g.bankrupt(0, None);
+
+    assert!(matches!(g.modal, Modal::Auction(_)), "the first lot goes up at once");
+    assert_eq!(g.pending.len(), 1, "the second waits its turn");
+}
+
+#[test]
+fn each_lot_goes_up_as_the_last_one_closes() {
+    let mut g = game(3, 1500);
+    own(&mut g, MEDITERRANEAN, 0);
+    own(&mut g, BOARDWALK, 0);
+    g.bankrupt(0, None);
+
+    g.handle_key(KeyCode::Char('b')); // player 2 bids on the first lot
+    g.handle_key(KeyCode::Char('p')); // player 3 passes, ending it
+    assert_eq!(g.board[MEDITERRANEAN].owner(), Some(1));
+    assert!(matches!(g.modal, Modal::Auction(_)), "straight on to Boardwalk");
+
+    g.handle_key(KeyCode::Char('b'));
+    g.handle_key(KeyCode::Char('p'));
+    assert_eq!(g.board[BOARDWALK].owner(), Some(1));
+    assert!(matches!(g.modal, Modal::None), "and the queue is empty");
+}
+
+#[test]
+fn a_creditor_owes_interest_on_inherited_mortgages() {
+    let mut g = game(3, 1500);
+    own(&mut g, BOARDWALK, 0);
+    g.board[BOARDWALK].set_mortgaged(true);
+    g.bankrupt(0, Some(1));
+
+    assert_eq!(g.board[BOARDWALK].owner(), Some(1));
+    assert!(g.board[BOARDWALK].is_mortgaged(), "it stays mortgaged");
+    assert_eq!(g.players[1].money, 1480, "10% of the $200 mortgage value");
+}
+
+#[test]
+fn an_unmortgaged_inheritance_costs_the_creditor_nothing() {
+    let mut g = game(3, 1500);
+    own(&mut g, BOARDWALK, 0);
+    g.bankrupt(0, Some(1));
+    assert_eq!(g.players[1].money, 1500);
+}
+
+#[test]
+fn winning_the_game_cancels_any_queued_lots() {
+    let mut g = game(2, 1500);
+    own(&mut g, MEDITERRANEAN, 1);
+    own(&mut g, BOARDWALK, 1);
+    g.bankrupt(1, None);
+    assert!(matches!(g.modal, Modal::GameOver(0)));
+    assert!(g.pending.is_empty(), "no auctions once the game is over");
+}
+
+#[test]
+fn a_bystander_going_bankrupt_does_not_end_the_current_turn() {
+    let mut g = game(3, 1500);
+    g.current = 0;
+    g.bankrupt(2, Some(0));
+    assert_eq!(g.current, 0, "player 1 keeps their turn");
+}
+
+#[test]
 fn the_last_player_standing_wins() {
     let mut g = game(2, 1500);
     g.bankrupt(1, Some(0));
@@ -314,38 +307,6 @@ fn holdings_lists_only_your_own_spaces_in_board_order() {
     own(&mut g, MEDITERRANEAN, 0);
     own(&mut g, BALTIC, 1);
     assert_eq!(g.holdings(0), vec![MEDITERRANEAN, BOARDWALK]);
-}
-
-// --- save state -------------------------------------------------------------
-
-#[test]
-fn a_save_round_trips_through_json() {
-    let mut g = game(2, 1500);
-    own(&mut g, BOARDWALK, 1);
-    set_houses(&mut g, MEDITERRANEAN, 3);
-    g.players[0].in_jail = true;
-    g.players[0].get_out_free = 1;
-    g.current = 1;
-    g.doubles = 2;
-
-    let save = Save {
-        players: g.players.clone(),
-        board: g.board.clone(),
-        current: g.current,
-        doubles: g.doubles,
-        can_roll: g.can_roll,
-        has_rolled: g.has_rolled,
-    };
-    let json = serde_json::to_string(&save).expect("serialize");
-    let restored = Game::from_save(serde_json::from_str(&json).expect("deserialize"));
-
-    assert_eq!(restored.current, 1);
-    assert_eq!(restored.doubles, 2);
-    assert_eq!(restored.board[BOARDWALK].owner(), Some(1));
-    assert_eq!(restored.board[MEDITERRANEAN].houses(), 3);
-    assert!(restored.players[0].in_jail);
-    assert_eq!(restored.players[0].get_out_free, 1);
-    assert!(matches!(restored.modal, Modal::None), "UI state is not saved");
 }
 
 // --- input dispatch ---------------------------------------------------------

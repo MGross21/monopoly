@@ -21,9 +21,7 @@ pub struct Menu {
 
 impl Menu {
     pub fn new() -> Self {
-        Self {
-            cursor: Cursor::new(OPTIONS.len()),
-        }
+        Self { cursor: Cursor::new(OPTIONS.len()) }
     }
 
     pub fn handle_key(&mut self, key: KeyCode) -> MenuAction {

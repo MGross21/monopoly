@@ -99,7 +99,7 @@ impl Game {
             self.notify("Sell the group's houses first", Level::Warn);
             return;
         }
-        let half = self.board[idx].price().unwrap_or(0) / 2;
+        let half = self.board[idx].mortgage_value();
         self.players[who].money += half;
         self.board[idx].set_mortgaged(true);
         let name = self.board[idx].name().to_string();
@@ -108,8 +108,7 @@ impl Game {
 
     /// Lift a mortgage for its value plus 10% interest.
     fn unmortgage(&mut self, who: usize, idx: usize) {
-        let half = self.board[idx].price().unwrap_or(0) / 2;
-        let lift = half + half / 10;
+        let lift = self.board[idx].unmortgage_cost();
         let name = self.board[idx].name().to_string();
         if self.players[who].money < lift {
             self.notify(format!("Need ${lift} to unmortgage {name}"), Level::Error);
@@ -121,7 +120,7 @@ impl Game {
     }
 
     /// Build one house (or the hotel) on `idx`, enforcing even building.
-    fn build_house(&mut self, idx: usize) {
+    pub(super) fn build_house(&mut self, idx: usize) {
         let me = self.current;
         let Space::Property(p) = &self.board[idx] else {
             return;
@@ -139,16 +138,32 @@ impl Game {
             self.notify("Build evenly across the group first", Level::Warn);
             return;
         }
+        let hotel = houses + 1 == HOTEL;
+        if hotel && self.hotels_left == 0 {
+            self.notify("The bank is out of hotels", Level::Warn);
+            return;
+        }
+        if !hotel && self.houses_left == 0 {
+            self.notify("The bank is out of houses", Level::Warn);
+            return;
+        }
         if self.players[me].money < cost {
             self.notify(format!("Need ${cost} to build here"), Level::Error);
             return;
         }
         self.players[me].money -= cost;
+        // A hotel is four houses traded back in, so the bank regains them.
+        if hotel {
+            self.hotels_left -= 1;
+            self.houses_left += HOTEL - 1;
+        } else {
+            self.houses_left -= 1;
+        }
         if let Space::Property(p) = &mut self.board[idx] {
             p.houses += 1;
         }
         let name = self.board[idx].name().to_string();
-        let what = if houses + 1 == HOTEL { "a hotel" } else { "a house" };
+        let what = if hotel { "a hotel" } else { "a house" };
         self.notify(format!("Player {} built {what} on {name} (-${cost})", me + 1), Level::Info);
     }
 
@@ -165,6 +180,17 @@ impl Game {
         if houses < self.group_house_bounds(group).1 {
             self.notify("Sell evenly across the group first", Level::Warn);
             return;
+        }
+        // Breaking a hotel takes four houses back out of the bank's stock.
+        if houses == HOTEL {
+            if self.houses_left < HOTEL - 1 {
+                self.notify("The bank has no houses to break the hotel into", Level::Warn);
+                return;
+            }
+            self.houses_left -= HOTEL - 1;
+            self.hotels_left += 1;
+        } else {
+            self.houses_left += 1;
         }
         if let Space::Property(p) = &mut self.board[idx] {
             p.houses -= 1;
@@ -219,11 +245,10 @@ impl Game {
                 let s = &self.board[i];
                 match menu.mode {
                     Mode::Mortgage => {
-                        let half = s.price().unwrap_or(0) / 2;
                         if s.is_mortgaged() {
-                            format!("{}  [unmortgage ${}]", s.name(), half + half / 10)
+                            format!("{}  [unmortgage ${}]", s.name(), s.unmortgage_cost())
                         } else {
-                            format!("{}  [mortgage +${half}]", s.name())
+                            format!("{}  [mortgage +${}]", s.name(), s.mortgage_value())
                         }
                     }
                     Mode::Build => {
@@ -244,6 +269,7 @@ impl Game {
 mod tests {
     use super::*;
     use crate::game::testkit::*;
+    use crate::game::{TOTAL_HOTELS, TOTAL_HOUSES};
 
     /// Player 0 owning the brown group outright, with cash to build.
     fn brown_monopoly() -> Game {
@@ -309,6 +335,97 @@ mod tests {
         g.board[BALTIC].set_mortgaged(true);
         g.build_house(MEDITERRANEAN);
         assert_eq!(g.board[MEDITERRANEAN].houses(), 0);
+    }
+
+    // --- the bank's stock ---------------------------------------------------
+
+    #[test]
+    fn the_bank_starts_with_the_full_stock() {
+        let g = game(2, 1500);
+        assert_eq!(g.houses_left, TOTAL_HOUSES);
+        assert_eq!(g.hotels_left, TOTAL_HOTELS);
+    }
+
+    #[test]
+    fn building_draws_houses_out_of_the_bank() {
+        let mut g = brown_monopoly();
+        g.build_house(MEDITERRANEAN);
+        g.build_house(BALTIC);
+        assert_eq!(g.houses_left, TOTAL_HOUSES - 2);
+        assert_eq!(g.hotels_left, TOTAL_HOTELS);
+    }
+
+    #[test]
+    fn a_hotel_trades_four_houses_back_in() {
+        let mut g = brown_monopoly();
+        for _ in 0..HOTEL {
+            g.build_house(MEDITERRANEAN);
+            g.build_house(BALTIC);
+        }
+        assert_eq!(g.hotels_left, TOTAL_HOTELS - 2);
+        assert_eq!(g.houses_left, TOTAL_HOUSES, "both groups of four came back");
+    }
+
+    #[test]
+    fn an_empty_house_stock_blocks_building() {
+        let mut g = brown_monopoly();
+        g.houses_left = 0;
+        g.build_house(MEDITERRANEAN);
+        assert_eq!(g.board[MEDITERRANEAN].houses(), 0);
+        assert_eq!(g.players[0].money, 1500, "and costs nothing");
+    }
+
+    #[test]
+    fn an_empty_hotel_stock_blocks_the_fifth_house() {
+        let mut g = brown_monopoly();
+        g.hotels_left = 0;
+        set_houses(&mut g, MEDITERRANEAN, 4);
+        set_houses(&mut g, BALTIC, 4);
+        g.build_house(MEDITERRANEAN);
+        assert_eq!(g.board[MEDITERRANEAN].houses(), 4);
+    }
+
+    #[test]
+    fn selling_returns_houses_to_the_bank() {
+        let mut g = brown_monopoly();
+        g.build_house(MEDITERRANEAN);
+        g.build_house(BALTIC);
+        g.sell_house(0, MEDITERRANEAN);
+        assert_eq!(g.houses_left, TOTAL_HOUSES - 1);
+    }
+
+    #[test]
+    fn breaking_a_hotel_takes_four_houses_back_out() {
+        let mut g = brown_monopoly();
+        set_houses(&mut g, MEDITERRANEAN, HOTEL);
+        set_houses(&mut g, BALTIC, HOTEL);
+        g.hotels_left = TOTAL_HOTELS - 2;
+        g.sell_house(0, MEDITERRANEAN);
+        assert_eq!(g.board[MEDITERRANEAN].houses(), 4);
+        assert_eq!(g.houses_left, TOTAL_HOUSES - 4);
+        assert_eq!(g.hotels_left, TOTAL_HOTELS - 1);
+    }
+
+    #[test]
+    fn a_hotel_cannot_be_broken_without_houses_to_break_it_into() {
+        let mut g = brown_monopoly();
+        set_houses(&mut g, MEDITERRANEAN, HOTEL);
+        set_houses(&mut g, BALTIC, HOTEL);
+        g.houses_left = 3;
+        g.sell_house(0, MEDITERRANEAN);
+        assert_eq!(g.board[MEDITERRANEAN].houses(), HOTEL, "the trade cannot be made");
+        assert_eq!(g.houses_left, 3);
+    }
+
+    #[test]
+    fn a_bankrupt_estate_returns_its_buildings_to_the_bank() {
+        let mut g = game(2, 1500);
+        own_group(&mut g, ColorGroup::Brown, 0);
+        g.build_house(MEDITERRANEAN);
+        g.build_house(BALTIC);
+        assert_eq!(g.houses_left, TOTAL_HOUSES - 2);
+        g.bankrupt(0, None);
+        assert_eq!(g.houses_left, TOTAL_HOUSES);
     }
 
     // --- selling ------------------------------------------------------------

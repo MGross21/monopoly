@@ -81,6 +81,13 @@ Three ways out:
 
 After the third failed turn you must pay the $50 and move out.
 
+## Building
+
+- You must own every street in a color group to build on it.
+- Build and sell evenly: no street may be more than one house ahead of its group.
+- A hotel is the fifth house.
+- The Bank holds 32 houses and 12 hotels; when it runs out, nobody can build.
+
 ## Mortgaging
 
 - Mortgage an unbuilt property to the Bank for half its printed price.
@@ -91,6 +98,9 @@ After the third failed turn you must pay the $50 and move out.
 
 - If you owe more than you can pay (even after mortgaging/selling), you are
   bankrupt and out of the game.
+- Bankrupt to a player: they take your cash and deeds, and owe 10% interest on
+  each mortgaged one.
+- Bankrupt to the Bank: your properties are auctioned off.
 - Last player remaining wins.
 
 ## Sources

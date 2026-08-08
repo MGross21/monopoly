@@ -8,7 +8,8 @@ use std::collections::VecDeque;
 
 use ratatui_notifications::Level;
 
-use super::{BOARD_LEN, Game, HOTEL, InfoBox, Modal, Payee};
+use super::{BOARD_LEN, Game, HOTEL, InfoBox, Modal, Payee, Pending, RentRule};
+use crate::space::Space;
 use crate::ui::dice::Clip;
 
 /// What drawing a card does to the current player.
@@ -24,6 +25,10 @@ enum CardEffect {
     PayEach(u32),
     /// Advance forward to an absolute board index, collecting GO if wrapping.
     AdvanceTo(usize),
+    /// Advance to the next railroad and pay twice its usual rent.
+    NearestRailroad,
+    /// Advance to the next utility and pay ten times a fresh roll.
+    NearestUtility,
     /// Move back this many spaces (never collects GO).
     Back(usize),
     /// Go directly to Jail.
@@ -82,11 +87,18 @@ fn chance_deck() -> Vec<Card> {
         card("Advance to Illinois Ave", AdvanceTo(24)),
         card("Advance to St. Charles Place", AdvanceTo(11)),
         card("Advance to Reading Railroad", AdvanceTo(5)),
+        card("Take a walk on the Boardwalk", AdvanceTo(39)),
+        card("Advance to the nearest Railroad — pay double rent", NearestRailroad),
+        card("Advance to the nearest Railroad — pay double rent", NearestRailroad),
+        card("Advance to the nearest Utility — pay 10x your roll", NearestUtility),
         card("Bank pays you a dividend of $50", Collect(50)),
         card("Get Out of Jail Free", GetOutFree),
         card("Go back 3 spaces", Back(3)),
         card("Go directly to Jail", GoToJail),
-        card("Make general repairs: $25/house, $100/hotel", Repairs { per_house: 25, per_hotel: 100 }),
+        card(
+            "Make general repairs: $25/house, $100/hotel",
+            Repairs { per_house: 25, per_hotel: 100 },
+        ),
         card("Speeding fine — pay $15", Pay(15)),
         card("Chairman of the Board — pay each player $50", PayEach(50)),
         card("Your building loan matures — collect $150", Collect(150)),
@@ -111,12 +123,21 @@ fn chest_deck() -> Vec<Card> {
         card("Life insurance matures — collect $100", Collect(100)),
         card("Pay hospital fees of $100", Pay(100)),
         card("Pay school fees of $50", Pay(50)),
+        card("Receive $25 consultancy fee", Collect(25)),
         card("Street repairs: $40/house, $115/hotel", Repairs { per_house: 40, per_hotel: 115 }),
+        card("Second prize in a beauty contest — collect $10", Collect(10)),
         card("You inherit $100", Collect(100)),
     ]
 }
 
 impl Game {
+    /// Steps forward from `who`'s square to the next space matching `wanted`.
+    /// Counts from the *next* square, so "nearest" never means "stay put".
+    fn steps_to(&self, who: usize, wanted: impl Fn(&Space) -> bool) -> usize {
+        let pos = self.players[who].position;
+        (1..=BOARD_LEN).find(|n| wanted(&self.board[(pos + n) % BOARD_LEN])).unwrap_or(0)
+    }
+
     /// Draw the top card of a deck (recycling it to the bottom) and start its
     /// animation. The effect is applied once the animation settles.
     pub(super) fn draw_card(&mut self, deck: Deck) {
@@ -161,15 +182,22 @@ impl Game {
             }
             CardEffect::Pay(n) => self.pay_bank(n),
             CardEffect::CollectEach(n) => {
-                for i in 0..self.players.len() {
-                    if i == who || self.players[i].bankrupt {
-                        continue;
+                self.notify(
+                    format!("Player {} collects ${n} from each player", who + 1),
+                    Level::Info,
+                );
+                // Each payer settles in turn, liquidating if they must, so the
+                // popups queue up rather than fighting over the screen.
+                for i in self.active_players() {
+                    if i != who {
+                        self.queue(Pending::Charge {
+                            who: i,
+                            amount: n,
+                            payee: Payee::Player(who),
+                        });
                     }
-                    let paid = self.players[i].money.min(n);
-                    self.players[i].money -= paid;
-                    self.players[who].money += paid;
                 }
-                self.notify(format!("Player {} collected ${n} from each player", who + 1), Level::Info);
+                self.run_pending();
             }
             CardEffect::PayEach(n) => {
                 let others: Vec<usize> =
@@ -181,27 +209,42 @@ impl Game {
                 let pos = self.players[who].position;
                 self.advance(who, (dest + BOARD_LEN - pos) % BOARD_LEN);
             }
+            CardEffect::NearestRailroad => {
+                let steps = self.steps_to(who, |s| matches!(s, Space::Railroad(_)));
+                self.advance_under(who, steps, RentRule::DoubleRailroad);
+            }
+            CardEffect::NearestUtility => {
+                let steps = self.steps_to(who, |s| matches!(s, Space::Utility(_)));
+                let roll: usize = rand::random_range(1..=6) + rand::random_range(1..=6);
+                self.notify(
+                    format!("Player {} throws {roll} for the utility", who + 1),
+                    Level::Info,
+                );
+                self.advance_under(who, steps, RentRule::TenTimesUtility(roll));
+            }
             CardEffect::Back(n) => {
                 let new = (self.players[who].position + BOARD_LEN - n) % BOARD_LEN;
                 self.players[who].position = new;
                 let name = self.board[new].name().to_string();
                 self.notify(format!("Player {} moved back to {name}", who + 1), Level::Info);
-                self.resolve_landing(new, n);
+                self.resolve_landing(new, n, RentRule::Normal);
             }
             CardEffect::GoToJail => self.send_to_jail(),
             CardEffect::GetOutFree => {
                 self.players[who].get_out_free += 1;
-                self.notify(format!("Player {} kept a Get Out of Jail Free card", who + 1), Level::Info);
+                self.notify(
+                    format!("Player {} kept a Get Out of Jail Free card", who + 1),
+                    Level::Info,
+                );
             }
             CardEffect::Repairs { per_house, per_hotel } => {
                 let mut houses = 0;
                 let mut hotels = 0;
-                for space in &self.board {
-                    if space.owner() == Some(who) {
-                        match space.houses() {
-                            HOTEL => hotels += 1,
-                            n => houses += n as u32,
-                        }
+                for space in self.estate(who) {
+                    match space.houses() {
+                        0 => {}
+                        HOTEL => hotels += 1,
+                        n => houses += u32::from(n),
                     }
                 }
                 let bill = houses * per_house + hotels * per_hotel;
@@ -215,6 +258,8 @@ impl Game {
 
 #[cfg(test)]
 mod tests {
+    use crossterm::event::KeyCode;
+
     use super::*;
     use crate::game::testkit::*;
     use crate::space::ColorGroup;
@@ -231,12 +276,22 @@ mod tests {
     #[test]
     fn each_deck_holds_exactly_one_get_out_of_jail_free() {
         for deck in [chance_deck(), chest_deck()] {
-            let count = deck
-                .iter()
-                .filter(|c| matches!(c.effect, CardEffect::GetOutFree))
-                .count();
+            let count = deck.iter().filter(|c| matches!(c.effect, CardEffect::GetOutFree)).count();
             assert_eq!(count, 1);
         }
+    }
+
+    #[test]
+    fn chance_carries_the_full_sixteen() {
+        assert_eq!(chance_deck().len(), 16);
+    }
+
+    #[test]
+    fn chance_has_two_nearest_railroad_cards_and_one_utility() {
+        let deck = chance_deck();
+        let count = |f: fn(&CardEffect) -> bool| deck.iter().filter(|c| f(&c.effect)).count();
+        assert_eq!(count(|e| matches!(e, CardEffect::NearestRailroad)), 2);
+        assert_eq!(count(|e| matches!(e, CardEffect::NearestUtility)), 1);
     }
 
     #[test]
@@ -307,6 +362,37 @@ mod tests {
     }
 
     #[test]
+    fn collect_each_makes_a_short_payer_liquidate() {
+        let mut g = game(3, 1500);
+        g.players[1].money = 10;
+        own(&mut g, MEDITERRANEAN, 1);
+        own(&mut g, BALTIC, 1);
+        g.apply_card(CardEffect::CollectEach(50));
+
+        assert!(matches!(g.modal, Modal::Debt(_)), "player 2 must raise the cash");
+        assert!(!g.players[1].bankrupt);
+        assert_eq!(g.players[2].money, 1500, "player 3 waits their turn in the queue");
+    }
+
+    #[test]
+    fn collect_each_resumes_after_the_liquidation_closes() {
+        let mut g = game(3, 1500);
+        g.players[1].money = 10;
+        own(&mut g, MEDITERRANEAN, 1);
+        own(&mut g, BALTIC, 1);
+        g.apply_card(CardEffect::CollectEach(50));
+
+        g.handle_key(KeyCode::Enter); // mortgage Mediterranean
+        g.handle_key(KeyCode::Down);
+        g.handle_key(KeyCode::Enter); // mortgage Baltic, clearing the debt
+
+        assert!(matches!(g.modal, Modal::None), "the queue drained");
+        assert_eq!(g.players[1].money, 20, "10 + 30 + 30 - 50");
+        assert_eq!(g.players[2].money, 1450, "and player 3 paid once the screen cleared");
+        assert_eq!(g.players[0].money, 1600, "the drawer collected from both");
+    }
+
+    #[test]
     fn pay_each_pays_every_rival() {
         let mut g = game(3, 1500);
         g.apply_card(CardEffect::PayEach(50));
@@ -352,6 +438,73 @@ mod tests {
         g.apply_card(CardEffect::AdvanceTo(ILLINOIS));
         assert_eq!(g.players[0].money, 1480);
         assert_eq!(g.players[1].money, 1520);
+    }
+
+    #[test]
+    fn the_nearest_railroad_is_the_next_one_forward() {
+        let mut g = game(2, 1500);
+        place(&mut g, 0, CHANCE_LOW);
+        g.apply_card(CardEffect::NearestRailroad);
+        assert_eq!(g.players[0].position, PENNSYLVANIA_RR);
+    }
+
+    #[test]
+    fn the_nearest_railroad_wraps_past_go() {
+        let mut g = game(2, 1500);
+        place(&mut g, 0, 36); // the Chance between Short Line and Park Place
+        g.apply_card(CardEffect::NearestRailroad);
+        assert_eq!(g.players[0].position, READING_RR);
+        assert_eq!(g.players[0].money, 1700, "and collects the salary on the way");
+    }
+
+    #[test]
+    fn the_nearest_railroad_charges_double_rent() {
+        let mut g = game(2, 1500);
+        own(&mut g, PENNSYLVANIA_RR, 1);
+        place(&mut g, 0, CHANCE_LOW);
+        g.apply_card(CardEffect::NearestRailroad);
+        assert_eq!(g.players[0].money, 1450, "2 x the $25 one-railroad rate");
+        assert_eq!(g.players[1].money, 1550);
+    }
+
+    #[test]
+    fn an_unowned_nearest_railroad_is_offered_for_sale() {
+        let mut g = game(2, 1500);
+        place(&mut g, 0, CHANCE_LOW);
+        g.apply_card(CardEffect::NearestRailroad);
+        assert!(matches!(g.modal, Modal::Buy { pos, .. } if pos == PENNSYLVANIA_RR));
+    }
+
+    #[test]
+    fn the_nearest_utility_is_the_next_one_forward() {
+        let mut g = game(2, 1500);
+        place(&mut g, 0, CHANCE_LOW);
+        g.apply_card(CardEffect::NearestUtility);
+        assert_eq!(g.players[0].position, ELECTRIC_CO);
+    }
+
+    #[test]
+    fn the_nearest_utility_charges_ten_times_a_fresh_roll() {
+        let mut g = game(2, 1500);
+        own(&mut g, ELECTRIC_CO, 1);
+        place(&mut g, 0, CHANCE_LOW);
+        g.apply_card(CardEffect::NearestUtility);
+
+        // The throw is random, so pin the range: 10 x (2..=12), never the
+        // 4x-the-distance rate a normal landing would have charged.
+        let paid = 1500 - g.players[0].money;
+        assert!((20..=120).contains(&paid), "paid {paid}");
+        assert_eq!(paid % 10, 0);
+        assert_eq!(g.players[1].money, 1500 + paid);
+    }
+
+    #[test]
+    fn a_single_utility_still_bills_ten_times_under_the_card() {
+        let mut g = game(2, 1500);
+        own(&mut g, ELECTRIC_CO, 1);
+        // A normal landing with one utility owned would be 4x, not 10x.
+        assert_eq!(g.rent(ELECTRIC_CO, 1, 6, RentRule::Normal), 24);
+        assert_eq!(g.rent(ELECTRIC_CO, 1, 6, RentRule::TenTimesUtility(6)), 60);
     }
 
     #[test]
@@ -444,7 +597,8 @@ mod tests {
     #[test]
     fn a_card_that_jails_you_ends_the_turn() {
         let mut g = game(2, 1500);
-        let card = Card { title: CHANCE_TITLE, text: "Go directly to Jail", effect: CardEffect::GoToJail };
+        let card =
+            Card { title: CHANCE_TITLE, text: "Go directly to Jail", effect: CardEffect::GoToJail };
         g.finish_card(card);
         assert!(!g.can_roll);
     }

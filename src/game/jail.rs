@@ -94,7 +94,10 @@ impl Game {
             Choice::Card => {
                 self.players[who].get_out_free -= 1;
                 self.free_from_jail(who);
-                self.notify(format!("Player {} used a Get Out of Jail Free card", who + 1), Level::Info);
+                self.notify(
+                    format!("Player {} used a Get Out of Jail Free card", who + 1),
+                    Level::Info,
+                );
             }
             Choice::Roll => {}
         }
@@ -113,10 +116,16 @@ impl Game {
             let n = self.players[who].jail_turns;
             if n >= 3 {
                 self.free_from_jail(who);
-                self.notify(format!("Player {} failed three times — pays ${BAIL} bail", who + 1), Level::Warn);
+                self.notify(
+                    format!("Player {} failed three times — pays ${BAIL} bail", who + 1),
+                    Level::Warn,
+                );
                 self.charge_then(who, BAIL, Payee::Bank, Some(total));
             } else {
-                self.notify(format!("Player {} failed to roll doubles ({n}/3)", who + 1), Level::Warn);
+                self.notify(
+                    format!("Player {} failed to roll doubles ({n}/3)", who + 1),
+                    Level::Warn,
+                );
             }
         }
         // Leaving jail never grants a bonus roll; the turn ends after this. A

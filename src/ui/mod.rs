@@ -17,12 +17,8 @@ use ratatui::{
 
 /// Center a `width` x `height` rect inside `area`.
 pub fn centered_rect(area: Rect, width: u16, height: u16) -> Rect {
-    let [area] = Layout::horizontal([Constraint::Length(width)])
-        .flex(Flex::Center)
-        .areas(area);
-    let [area] = Layout::vertical([Constraint::Length(height)])
-        .flex(Flex::Center)
-        .areas(area);
+    let [area] = Layout::horizontal([Constraint::Length(width)]).flex(Flex::Center).areas(area);
+    let [area] = Layout::vertical([Constraint::Length(height)]).flex(Flex::Center).areas(area);
     area
 }
 
@@ -115,11 +111,9 @@ impl Confirm {
     }
 }
 
-/// Centered info popup listing static `lines` (no selection). For lists too
-/// large for a toast (e.g. owned properties).
-pub fn info_popup(frame: &mut Frame, title: &str, lines: &[String]) {
-    let width = 48;
-    let height = (lines.len() as u16 + 2).clamp(3, frame.area().height);
+/// Draw a centered, bordered black panel and return the area inside it. The
+/// shared scaffold behind every popup in the game.
+pub fn popup_frame(frame: &mut Frame, title: &str, width: u16, height: u16) -> Rect {
     let area = centered_rect(frame.area(), width, height);
     let block = Block::bordered()
         .title_top(Line::from(title).centered())
@@ -127,7 +121,14 @@ pub fn info_popup(frame: &mut Frame, title: &str, lines: &[String]) {
     let inner = block.inner(area);
     frame.render_widget(Clear, area);
     frame.render_widget(block, area);
+    inner
+}
 
+/// Centered info popup listing static `lines` (no selection). For lists too
+/// large for a toast (e.g. owned properties).
+pub fn info_popup(frame: &mut Frame, title: &str, lines: &[String]) {
+    let height = (lines.len() as u16 + 2).clamp(3, frame.area().height);
+    let inner = popup_frame(frame, title, 48, height);
     let body: Vec<Line> = if lines.is_empty() {
         vec![Line::from("(empty)").centered()]
     } else {
@@ -139,19 +140,9 @@ pub fn info_popup(frame: &mut Frame, title: &str, lines: &[String]) {
 /// Centered black popup listing `options` with `selected` highlighted. Width
 /// grows to fit the longest option (and the title), with a 28-col floor.
 pub fn choice_popup<S: AsRef<str>>(frame: &mut Frame, title: &str, options: &[S], selected: usize) {
-    let longest = options
-        .iter()
-        .map(|o| o.as_ref().chars().count())
-        .max()
-        .unwrap_or(0) as u16;
+    let longest = options.iter().map(|o| o.as_ref().chars().count()).max().unwrap_or(0) as u16;
     let width = (longest + 4).max(title.chars().count() as u16 + 4).max(28);
-    let area = centered_rect(frame.area(), width, options.len() as u16 + 2);
-    let block = Block::bordered()
-        .title_top(Line::from(title).centered())
-        .style(Style::new().bg(Color::Black).fg(Color::White).bold());
-    let inner = block.inner(area);
-    frame.render_widget(Clear, area);
-    frame.render_widget(block, area);
+    let inner = popup_frame(frame, title, width, options.len() as u16 + 2);
     frame.render_widget(Paragraph::new(selectable_lines(options, selected)), inner);
 }
 

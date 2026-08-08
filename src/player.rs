@@ -68,9 +68,9 @@ pub struct Player {
     pub money: u32,
     pub position: usize, // board index, starts on GO
     pub in_jail: bool,
-    pub jail_turns: u8,    // consecutive turns spent in jail (0..3)
-    pub get_out_free: u8,  // unused Get Out of Jail Free cards held
-    pub bankrupt: bool,    // eliminated from the game
+    pub jail_turns: u8,   // consecutive turns spent in jail (0..3)
+    pub get_out_free: u8, // unused Get Out of Jail Free cards held
+    pub bankrupt: bool,   // eliminated from the game
 }
 
 impl Player {

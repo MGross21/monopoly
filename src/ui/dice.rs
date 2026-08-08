@@ -46,10 +46,7 @@ impl Animation {
     /// Decode embedded GIF bytes into ASCII frames.
     fn load(bytes: &[u8]) -> Self {
         let decoder = GifDecoder::new(Cursor::new(bytes)).expect("decode gif");
-        let frames = decoder
-            .into_frames()
-            .collect_frames()
-            .expect("read gif frames");
+        let frames = decoder.into_frames().collect_frames().expect("read gif frames");
         let frames = frames.iter().map(|f| asciify(f.buffer())).collect();
         Self { frames }
     }
@@ -71,10 +68,7 @@ pub struct Clip {
 
 impl Clip {
     pub fn new() -> Self {
-        Self {
-            frame: 0,
-            elapsed: Duration::ZERO,
-        }
+        Self { frame: 0, elapsed: Duration::ZERO }
     }
 
     pub fn finished(&self, anim: &Animation) -> bool {
@@ -105,10 +99,7 @@ pub struct Roll {
 
 impl Roll {
     pub fn new() -> Self {
-        Self {
-            clip: Clip::new(),
-            result: None,
-        }
+        Self { clip: Clip::new(), result: None }
     }
 
     /// True while the GIF is still playing (no dice rolled yet).
@@ -148,9 +139,7 @@ pub fn render_clip(frame: &mut Frame, anim: &Animation, clip: &Clip, title: &str
 
 fn render_animation(frame: &mut Frame, ascii: &Text<'static>, title: &str) {
     let area = centered_rect(frame.area(), FRAME_COLS + 2, FRAME_ROWS + 2);
-    let block = Block::bordered()
-        .title(title.to_string())
-        .style(Style::new().bg(Color::Black));
+    let block = Block::bordered().title(title.to_string()).style(Style::new().bg(Color::Black));
     let inner = block.inner(area);
     frame.render_widget(Clear, area);
     frame.render_widget(block, area);
@@ -168,11 +157,8 @@ fn render_result(frame: &mut Frame, a: u8, b: u8) {
 
     // Two boxed dice side by side, then the total.
     let (left, right) = (die_box(a), die_box(b));
-    let mut lines: Vec<Line> = left
-        .iter()
-        .zip(&right)
-        .map(|(l, r)| Line::from(format!("{l}   {r}")).centered())
-        .collect();
+    let mut lines: Vec<Line> =
+        left.iter().zip(&right).map(|(l, r)| Line::from(format!("{l}   {r}")).centered()).collect();
     lines.push(Line::from(""));
     lines.push(Line::from(format!("Total: {}", a + b)).centered().bold());
     frame.render_widget(Paragraph::new(lines).centered(), inner);
@@ -215,12 +201,8 @@ fn pips(value: u8) -> [[bool; 3]; 3] {
 /// Downscale one GIF frame and map it to colored ASCII.
 fn asciify(rgba: &image::RgbaImage) -> Text<'static> {
     // Nearest is far cheaper than bilinear and indistinguishable at this size.
-    let small = image::imageops::resize(
-        rgba,
-        FRAME_COLS as u32,
-        FRAME_ROWS as u32,
-        FilterType::Nearest,
-    );
+    let small =
+        image::imageops::resize(rgba, FRAME_COLS as u32, FRAME_ROWS as u32, FilterType::Nearest);
     let mut lines = Vec::with_capacity(FRAME_ROWS as usize);
     for y in 0..FRAME_ROWS as u32 {
         let mut spans = Vec::with_capacity(FRAME_COLS as usize);
