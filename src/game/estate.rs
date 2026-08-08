@@ -37,9 +37,7 @@ impl EstateMenu {
 impl Game {
     /// Open the mortgage list for the current player's holdings.
     pub(super) fn open_mortgages(&mut self) {
-        let me = self.current;
-        let slots: Vec<usize> =
-            (0..self.board.len()).filter(|&i| self.board[i].owner() == Some(me)).collect();
+        let slots = self.holdings(self.current);
         if slots.is_empty() {
             self.notify("You don't own anything to mortgage", Level::Warn);
             return;
@@ -70,40 +68,56 @@ impl Game {
             KeyCode::Down => menu.cursor.down(),
             KeyCode::Esc => return false,
             KeyCode::Enter => match menu.mode {
-                Mode::Mortgage => self.toggle_mortgage(menu.selected()),
+                Mode::Mortgage => self.toggle_mortgage(self.current, menu.selected()),
                 Mode::Build => self.build_house(menu.selected()),
             },
             // Sell a house back (build mode only).
-            KeyCode::Char('s') if menu.mode == Mode::Build => self.sell_house(menu.selected()),
+            KeyCode::Char('s') if menu.mode == Mode::Build => {
+                self.sell_house(self.current, menu.selected())
+            }
             _ => {}
         }
         true
     }
 
-    /// Toggle a property's mortgage: lift it for half price + 10% interest, or
-    /// take the mortgage and receive half its price. Houses block mortgaging.
-    fn toggle_mortgage(&mut self, idx: usize) {
-        let me = self.current;
-        if self.board[idx].houses() > 0 {
-            self.notify("Sell the houses on this group first", Level::Warn);
+    fn toggle_mortgage(&mut self, who: usize, idx: usize) {
+        if self.board[idx].is_mortgaged() {
+            self.unmortgage(who, idx);
+        } else {
+            self.mortgage(who, idx);
+        }
+    }
+
+    /// Take a mortgage for half the printed price. Blocked while the color group
+    /// still has buildings on it.
+    pub(super) fn mortgage(&mut self, who: usize, idx: usize) {
+        if self.board[idx].is_mortgaged() {
+            self.notify("Already mortgaged", Level::Warn);
+            return;
+        }
+        if self.group_has_houses(idx) {
+            self.notify("Sell the group's houses first", Level::Warn);
             return;
         }
         let half = self.board[idx].price().unwrap_or(0) / 2;
+        self.players[who].money += half;
+        self.board[idx].set_mortgaged(true);
         let name = self.board[idx].name().to_string();
-        if self.board[idx].is_mortgaged() {
-            let lift = half + half / 10; // value + 10% interest
-            if self.players[me].money < lift {
-                self.notify(format!("Need ${lift} to unmortgage {name}"), Level::Error);
-                return;
-            }
-            self.players[me].money -= lift;
-            self.board[idx].set_mortgaged(false);
-            self.notify(format!("Player {} unmortgaged {name} for ${lift}", me + 1), Level::Info);
-        } else {
-            self.players[me].money += half;
-            self.board[idx].set_mortgaged(true);
-            self.notify(format!("Player {} mortgaged {name} for ${half}", me + 1), Level::Info);
+        self.notify(format!("Player {} mortgaged {name} for ${half}", who + 1), Level::Info);
+    }
+
+    /// Lift a mortgage for its value plus 10% interest.
+    fn unmortgage(&mut self, who: usize, idx: usize) {
+        let half = self.board[idx].price().unwrap_or(0) / 2;
+        let lift = half + half / 10;
+        let name = self.board[idx].name().to_string();
+        if self.players[who].money < lift {
+            self.notify(format!("Need ${lift} to unmortgage {name}"), Level::Error);
+            return;
         }
+        self.players[who].money -= lift;
+        self.board[idx].set_mortgaged(false);
+        self.notify(format!("Player {} unmortgaged {name} for ${lift}", who + 1), Level::Info);
     }
 
     /// Build one house (or the hotel) on `idx`, enforcing even building.
@@ -139,8 +153,7 @@ impl Game {
     }
 
     /// Sell one house back to the bank for half its cost, even-build enforced.
-    fn sell_house(&mut self, idx: usize) {
-        let me = self.current;
+    pub(super) fn sell_house(&mut self, who: usize, idx: usize) {
         let Space::Property(p) = &self.board[idx] else {
             return;
         };
@@ -157,9 +170,9 @@ impl Game {
             p.houses -= 1;
         }
         let refund = cost / 2;
-        self.players[me].money += refund;
+        self.players[who].money += refund;
         let name = self.board[idx].name().to_string();
-        self.notify(format!("Player {} sold a house on {name} (+${refund})", me + 1), Level::Info);
+        self.notify(format!("Player {} sold a house on {name} (+${refund})", who + 1), Level::Info);
     }
 
     /// Lowest and highest house counts across `group` (for even-build rules).
@@ -177,12 +190,21 @@ impl Game {
         (min, max)
     }
 
-    /// Is any property in `group` mortgaged? (Blocks building.)
+    /// True when any property in `group` is mortgaged, which blocks building.
     fn group_any_mortgaged(&self, group: ColorGroup) -> bool {
         self.board.iter().any(|s| match s {
             Space::Property(p) => p.group == group && p.base.mortgaged,
             _ => false,
         })
+    }
+
+    /// True when the color group containing `idx` still has buildings on it,
+    /// which blocks mortgaging. Always false for railroads and utilities.
+    pub(super) fn group_has_houses(&self, idx: usize) -> bool {
+        let Space::Property(p) = &self.board[idx] else {
+            return false;
+        };
+        self.group_house_bounds(p.group).1 > 0
     }
 
     pub(super) fn render_estate(&self, frame: &mut Frame, menu: &EstateMenu) {
@@ -215,5 +237,193 @@ impl Game {
             })
             .collect();
         choice_popup(frame, title, &lines, menu.cursor.selected);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::game::testkit::*;
+
+    /// Player 0 owning the brown group outright, with cash to build.
+    fn brown_monopoly() -> Game {
+        let mut g = game(2, 1500);
+        own_group(&mut g, ColorGroup::Brown, 0);
+        g
+    }
+
+    // --- building -----------------------------------------------------------
+
+    #[test]
+    fn building_needs_the_whole_color_group() {
+        let mut g = game(2, 1500);
+        own(&mut g, MEDITERRANEAN, 0);
+        g.open_build();
+        assert!(matches!(g.modal, Modal::None), "a partial group offers nothing");
+    }
+
+    #[test]
+    fn a_house_costs_its_printed_price() {
+        let mut g = brown_monopoly();
+        g.build_house(MEDITERRANEAN);
+        assert_eq!(g.board[MEDITERRANEAN].houses(), 1);
+        assert_eq!(g.players[0].money, 1450);
+    }
+
+    #[test]
+    fn building_must_stay_even_across_the_group() {
+        let mut g = brown_monopoly();
+        g.build_house(MEDITERRANEAN);
+        g.build_house(MEDITERRANEAN);
+        assert_eq!(g.board[MEDITERRANEAN].houses(), 1, "the second house must go elsewhere");
+
+        g.build_house(BALTIC);
+        g.build_house(MEDITERRANEAN);
+        assert_eq!(g.board[MEDITERRANEAN].houses(), 2);
+    }
+
+    #[test]
+    fn the_fifth_house_is_the_hotel_and_the_last() {
+        let mut g = brown_monopoly();
+        for _ in 0..HOTEL {
+            g.build_house(MEDITERRANEAN);
+            g.build_house(BALTIC);
+        }
+        assert_eq!(g.board[MEDITERRANEAN].houses(), HOTEL);
+        g.build_house(MEDITERRANEAN);
+        assert_eq!(g.board[MEDITERRANEAN].houses(), HOTEL, "nothing beyond a hotel");
+    }
+
+    #[test]
+    fn building_is_refused_without_the_cash() {
+        let mut g = brown_monopoly();
+        g.players[0].money = 10;
+        g.build_house(MEDITERRANEAN);
+        assert_eq!(g.board[MEDITERRANEAN].houses(), 0);
+        assert_eq!(g.players[0].money, 10);
+    }
+
+    #[test]
+    fn a_mortgaged_group_cannot_be_built_on() {
+        let mut g = brown_monopoly();
+        g.board[BALTIC].set_mortgaged(true);
+        g.build_house(MEDITERRANEAN);
+        assert_eq!(g.board[MEDITERRANEAN].houses(), 0);
+    }
+
+    // --- selling ------------------------------------------------------------
+
+    #[test]
+    fn a_house_sells_back_for_half() {
+        let mut g = brown_monopoly();
+        set_houses(&mut g, MEDITERRANEAN, 1);
+        set_houses(&mut g, BALTIC, 1);
+        g.sell_house(0, MEDITERRANEAN);
+        assert_eq!(g.board[MEDITERRANEAN].houses(), 0);
+        assert_eq!(g.players[0].money, 1525);
+    }
+
+    #[test]
+    fn selling_must_stay_even_across_the_group() {
+        let mut g = brown_monopoly();
+        set_houses(&mut g, MEDITERRANEAN, 1);
+        set_houses(&mut g, BALTIC, 2);
+        g.sell_house(0, MEDITERRANEAN);
+        assert_eq!(g.board[MEDITERRANEAN].houses(), 1, "sell off the taller street first");
+    }
+
+    #[test]
+    fn selling_from_a_bare_street_is_refused() {
+        let mut g = brown_monopoly();
+        g.sell_house(0, MEDITERRANEAN);
+        assert_eq!(g.players[0].money, 1500);
+    }
+
+    // --- mortgages ----------------------------------------------------------
+
+    #[test]
+    fn a_mortgage_pays_half_the_printed_price() {
+        let mut g = game(2, 1500);
+        own(&mut g, MEDITERRANEAN, 0);
+        g.mortgage(0, MEDITERRANEAN);
+        assert!(g.board[MEDITERRANEAN].is_mortgaged());
+        assert_eq!(g.players[0].money, 1530);
+    }
+
+    #[test]
+    fn lifting_a_mortgage_costs_the_value_plus_ten_percent() {
+        let mut g = game(2, 1500);
+        own(&mut g, MEDITERRANEAN, 0);
+        g.mortgage(0, MEDITERRANEAN);
+        g.unmortgage(0, MEDITERRANEAN);
+        assert!(!g.board[MEDITERRANEAN].is_mortgaged());
+        assert_eq!(g.players[0].money, 1497, "1500 + 30 - 33");
+    }
+
+    #[test]
+    fn lifting_is_refused_without_the_cash() {
+        let mut g = game(2, 1500);
+        own(&mut g, MEDITERRANEAN, 0);
+        g.board[MEDITERRANEAN].set_mortgaged(true);
+        g.players[0].money = 10;
+        g.unmortgage(0, MEDITERRANEAN);
+        assert!(g.board[MEDITERRANEAN].is_mortgaged());
+        assert_eq!(g.players[0].money, 10);
+    }
+
+    #[test]
+    fn mortgaging_is_blocked_while_the_group_holds_buildings() {
+        let mut g = brown_monopoly();
+        set_houses(&mut g, BALTIC, 1);
+        g.mortgage(0, MEDITERRANEAN);
+        assert!(!g.board[MEDITERRANEAN].is_mortgaged(), "sell the group's houses first");
+    }
+
+    #[test]
+    fn railroads_mortgage_freely() {
+        let mut g = game(2, 1500);
+        own(&mut g, READING_RR, 0);
+        g.mortgage(0, READING_RR);
+        assert!(g.board[READING_RR].is_mortgaged());
+        assert_eq!(g.players[0].money, 1600);
+    }
+
+    #[test]
+    fn mortgaging_twice_is_refused() {
+        let mut g = game(2, 1500);
+        own(&mut g, MEDITERRANEAN, 0);
+        g.mortgage(0, MEDITERRANEAN);
+        g.mortgage(0, MEDITERRANEAN);
+        assert_eq!(g.players[0].money, 1530, "paid out once");
+    }
+
+    #[test]
+    fn the_mortgage_list_needs_something_to_list() {
+        let mut g = game(2, 1500);
+        g.open_mortgages();
+        assert!(matches!(g.modal, Modal::None));
+
+        own(&mut g, MEDITERRANEAN, 0);
+        g.open_mortgages();
+        assert!(matches!(g.modal, Modal::Estate(_)));
+    }
+
+    #[test]
+    fn the_estate_popup_closes_on_escape() {
+        let mut g = brown_monopoly();
+        g.open_build();
+        assert!(matches!(g.modal, Modal::Estate(_)));
+        g.handle_key(KeyCode::Esc);
+        assert!(matches!(g.modal, Modal::None));
+    }
+
+    #[test]
+    fn the_build_popup_buys_and_sells_through_the_cursor() {
+        let mut g = brown_monopoly();
+        g.open_build();
+        g.handle_key(KeyCode::Enter); // build on Mediterranean
+        assert_eq!(g.board[MEDITERRANEAN].houses(), 1);
+        g.handle_key(KeyCode::Char('s'));
+        assert_eq!(g.board[MEDITERRANEAN].houses(), 0);
     }
 }

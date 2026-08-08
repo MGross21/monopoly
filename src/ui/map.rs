@@ -210,11 +210,11 @@ fn render_panel(area: Rect, players: &[Player], board: &[Space], turn: usize, bu
         .map(|(i, p)| {
             let owned = board.iter().filter(|s| s.owner() == Some(i)).count();
             let tag = if p.bankrupt {
-                " (out)".to_string()
+                " (out)"
             } else if p.in_jail {
-                " [jail]".to_string()
+                " [jail]"
             } else {
-                String::new()
+                ""
             };
             let text = format!(" {} P{}  ${}  {owned} props{tag} ", p.piece.icon(), i + 1, p.money);
             let line = Line::from(text);
@@ -411,10 +411,13 @@ fn render_space(space: &Space, area: Rect, bg: Color, owner_icon: Option<&str>, 
     }
 }
 
-/// Name trimmed to the inner width (cell width minus the two borders).
-fn short_name(space: &Space, cell_width: u16) -> String {
+/// Name trimmed to the inner width (cell width minus the two borders), cut on a
+/// char boundary so it can borrow instead of allocating every frame.
+fn short_name(space: &Space, cell_width: u16) -> &str {
     let max = cell_width.saturating_sub(2) as usize;
-    space.name().chars().take(max).collect()
+    let name = space.name();
+    let end = name.char_indices().nth(max).map_or(name.len(), |(i, _)| i);
+    &name[..end]
 }
 
 /// Owner (with their token) if bought, else price; "-$amount" for tax; blank
@@ -429,5 +432,82 @@ fn detail_line(space: &Space, owner_icon: Option<&str>) -> String {
     match space {
         Space::Tax(amount) => format!("-${amount}"),
         _ => String::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::board::board;
+    use crate::space::ColorGroup;
+
+    const RING: usize = SIZE;
+
+    #[test]
+    fn the_ring_maps_the_corners_clockwise_from_go() {
+        let last = RING - 1;
+        assert_eq!(ring_index(last, last, RING, RING), Some(0), "GO, bottom-right");
+        assert_eq!(ring_index(last, 0, RING, RING), Some(10), "Jail, bottom-left");
+        assert_eq!(ring_index(0, 0, RING, RING), Some(20), "Free Parking, top-left");
+        assert_eq!(ring_index(0, last, RING, RING), Some(30), "Go To Jail, top-right");
+    }
+
+    #[test]
+    fn the_interior_is_not_part_of_the_ring() {
+        for r in 1..RING - 1 {
+            for c in 1..RING - 1 {
+                assert_eq!(ring_index(r, c, RING, RING), None);
+            }
+        }
+    }
+
+    #[test]
+    fn the_ring_covers_every_board_index_exactly_once() {
+        let mut seen = vec![0u8; board().len()];
+        for r in 0..RING {
+            for c in 0..RING {
+                if let Some(i) = ring_index(r, c, RING, RING) {
+                    seen[i] += 1;
+                }
+            }
+        }
+        assert!(seen.iter().all(|&n| n == 1), "every space is drawn once: {seen:?}");
+    }
+
+    #[test]
+    fn a_short_name_is_left_untouched() {
+        let space = Space::Go;
+        assert_eq!(short_name(&space, 40), "GO");
+    }
+
+    #[test]
+    fn a_long_name_is_cut_to_the_inner_width() {
+        let space = Space::FreeParking;
+        assert_eq!(short_name(&space, 8), "Free P", "8 columns less two borders");
+        assert_eq!(short_name(&space, 2), "");
+    }
+
+    #[test]
+    fn trimming_never_splits_a_character() {
+        let space = Space::street("Café Münster", ColorGroup::Brown, 60, [1, 2, 3, 4, 5, 6], 50);
+        for width in 0..20u16 {
+            let cut = short_name(&space, width);
+            assert!(space.name().starts_with(cut));
+            assert!(cut.chars().count() <= width.saturating_sub(2) as usize);
+        }
+    }
+
+    #[test]
+    fn the_detail_line_shows_the_price_until_it_is_bought() {
+        let mut space = Space::street("Boardwalk", ColorGroup::DarkBlue, 400, [1, 2, 3, 4, 5, 6], 200);
+        assert_eq!(detail_line(&space, None), "$400");
+        space.set_owner(Some(0));
+        assert_eq!(detail_line(&space, Some("X")), "P1 X");
+    }
+
+    #[test]
+    fn the_detail_line_shows_taxes_and_nothing_else() {
+        assert_eq!(detail_line(&Space::Tax(200), None), "-$200");
+        assert_eq!(detail_line(&Space::FreeParking, None), "");
     }
 }

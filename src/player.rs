@@ -86,3 +86,52 @@ impl Player {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn there_are_eight_tokens() {
+        assert_eq!(Piece::all().count(), Piece::COUNT);
+        assert_eq!(Piece::COUNT, 8);
+    }
+
+    #[test]
+    fn stepping_forward_wraps_round_the_tokens() {
+        let mut piece = Piece::TopHat;
+        for _ in 0..Piece::COUNT {
+            piece = piece.next();
+        }
+        assert_eq!(piece, Piece::TopHat);
+    }
+
+    #[test]
+    fn stepping_back_wraps_the_other_way() {
+        assert_eq!(Piece::TopHat.prev(), Piece::Wheelbarrow);
+        assert_eq!(Piece::TopHat.next().prev(), Piece::TopHat);
+    }
+
+    #[test]
+    fn every_token_has_a_distinct_icon_and_label() {
+        let icons: Vec<&str> = Piece::all().map(Piece::icon).collect();
+        let labels: Vec<&str> = Piece::all().map(Piece::label).collect();
+        for i in 0..icons.len() {
+            for j in i + 1..icons.len() {
+                assert_ne!(icons[i], icons[j]);
+                assert_ne!(labels[i], labels[j]);
+            }
+        }
+    }
+
+    #[test]
+    fn a_new_player_starts_on_go_and_out_of_jail() {
+        let p = Player::new(Piece::Car, 1500);
+        assert_eq!(p.money, 1500);
+        assert_eq!(p.position, 0);
+        assert!(!p.in_jail);
+        assert_eq!(p.jail_turns, 0);
+        assert_eq!(p.get_out_free, 0);
+        assert!(!p.bankrupt);
+    }
+}

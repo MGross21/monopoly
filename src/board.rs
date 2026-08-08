@@ -58,3 +58,107 @@ pub fn board() -> Vec<Space> {
         street("Boardwalk", DarkBlue, 400, [50, 200, 600, 1400, 1700, 2000], 200),
     ]
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_board_has_forty_spaces() {
+        assert_eq!(board().len(), 40);
+    }
+
+    #[test]
+    fn the_corners_sit_where_the_rules_expect() {
+        let board = board();
+        assert!(matches!(board[0], Space::Go));
+        assert!(matches!(board[10], Space::Jail));
+        assert!(matches!(board[20], Space::FreeParking));
+        assert!(matches!(board[30], Space::GoToJail));
+    }
+
+    #[test]
+    fn the_card_targets_land_on_the_named_spaces() {
+        let board = board();
+        assert_eq!(board[5].name(), "Reading RR");
+        assert_eq!(board[11].name(), "St. Charles Pl");
+        assert_eq!(board[24].name(), "Illinois Ave");
+        assert_eq!(board[39].name(), "Boardwalk");
+    }
+
+    #[test]
+    fn the_deck_squares_are_dealt_out_correctly() {
+        let board = board();
+        let count = |f: fn(&Space) -> bool| board.iter().filter(|s| f(s)).count();
+        assert_eq!(count(|s| matches!(s, Space::Chance)), 3);
+        assert_eq!(count(|s| matches!(s, Space::CommunityChest)), 3);
+        assert_eq!(count(|s| matches!(s, Space::Tax(_))), 2);
+        assert_eq!(count(|s| matches!(s, Space::Railroad(_))), 4);
+        assert_eq!(count(|s| matches!(s, Space::Utility(_))), 2);
+        assert_eq!(count(|s| matches!(s, Space::Property(_))), 22);
+    }
+
+    #[test]
+    fn every_color_group_has_its_full_complement() {
+        use ColorGroup::*;
+        let board = board();
+        for (group, expected) in [
+            (Brown, 2),
+            (LightBlue, 3),
+            (Pink, 3),
+            (Orange, 3),
+            (Red, 3),
+            (Yellow, 3),
+            (Green, 3),
+            (DarkBlue, 2),
+        ] {
+            let count = board
+                .iter()
+                .filter(|s| matches!(s, Space::Property(p) if p.group == group))
+                .count();
+            assert_eq!(count, expected, "{group:?}");
+        }
+    }
+
+    #[test]
+    fn rent_rises_with_every_level_of_development() {
+        for space in board() {
+            if let Space::Property(p) = space {
+                assert!(
+                    p.rents.windows(2).all(|w| w[0] < w[1]),
+                    "{} has a flat or falling rent table",
+                    p.base.name
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn every_buyable_space_is_priced() {
+        for space in board() {
+            if space.is_ownable() {
+                assert!(space.price().unwrap_or(0) > 0, "{} is free", space.name());
+            }
+        }
+    }
+
+    #[test]
+    fn the_railroads_and_utilities_carry_their_flat_prices() {
+        for space in board() {
+            match space {
+                Space::Railroad(o) => assert_eq!(o.price, RAILROAD_PRICE),
+                Space::Utility(o) => assert_eq!(o.price, UTILITY_PRICE),
+                _ => {}
+            }
+        }
+    }
+
+    #[test]
+    fn nothing_starts_owned_or_developed() {
+        for space in board() {
+            assert_eq!(space.owner(), None);
+            assert_eq!(space.houses(), 0);
+            assert!(!space.is_mortgaged());
+        }
+    }
+}

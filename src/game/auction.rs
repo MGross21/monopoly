@@ -106,3 +106,104 @@ impl Game {
         crate::ui::info_popup(frame, " Auction ", &lines);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::game::testkit::*;
+
+    fn bidding(count: usize) -> Game {
+        let mut g = game(count, 1500);
+        g.start_auction(BOARDWALK);
+        g
+    }
+
+    #[test]
+    fn declining_the_buy_prompt_starts_an_auction() {
+        let mut g = game(2, 1500);
+        place(&mut g, 0, BOARDWALK - 5);
+        g.apply_roll(2, 3);
+        assert!(matches!(g.modal, Modal::Buy { .. }));
+        g.handle_key(KeyCode::Enter); // the prompt defaults to "No"
+        assert!(matches!(g.modal, Modal::Auction(_)));
+    }
+
+    #[test]
+    fn each_bid_raises_the_price_by_one_step() {
+        let mut g = bidding(2);
+        g.handle_key(KeyCode::Char('b'));
+        g.handle_key(KeyCode::Char('b'));
+        let Modal::Auction(auc) = &g.modal else { panic!("expected the auction") };
+        assert_eq!(auc.high_bid, STEP * 2);
+        assert_eq!(auc.high_bidder, Some(1));
+    }
+
+    #[test]
+    fn bidding_passes_the_turn_round_the_table() {
+        let mut g = bidding(3);
+        g.handle_key(KeyCode::Char('b'));
+        let Modal::Auction(auc) = &g.modal else { panic!("expected the auction") };
+        assert_eq!(auc.active[auc.turn], 1);
+    }
+
+    #[test]
+    fn the_last_bidder_left_wins_the_lot() {
+        let mut g = bidding(2);
+        g.handle_key(KeyCode::Char('b')); // player 0 bids $10
+        g.handle_key(KeyCode::Char('p')); // player 1 passes
+        assert!(matches!(g.modal, Modal::None), "the auction is over");
+        assert_eq!(g.board[BOARDWALK].owner(), Some(0));
+        assert_eq!(g.players[0].money, 1490);
+    }
+
+    #[test]
+    fn nobody_bidding_leaves_the_lot_with_the_bank() {
+        let mut g = bidding(2);
+        g.handle_key(KeyCode::Char('p'));
+        g.handle_key(KeyCode::Char('p'));
+        assert!(matches!(g.modal, Modal::None));
+        assert_eq!(g.board[BOARDWALK].owner(), None);
+        assert_eq!(g.players[0].money, 1500);
+    }
+
+    #[test]
+    fn a_bid_beyond_your_cash_is_refused() {
+        let mut g = bidding(2);
+        g.players[0].money = 5;
+        g.handle_key(KeyCode::Char('b'));
+        let Modal::Auction(auc) = &g.modal else { panic!("expected the auction") };
+        assert_eq!(auc.high_bidder, None);
+        assert_eq!(auc.active[auc.turn], 0, "and the turn does not move on");
+    }
+
+    #[test]
+    fn eliminated_players_are_not_invited() {
+        let mut g = game(3, 1500);
+        g.players[1].bankrupt = true;
+        g.start_auction(BOARDWALK);
+        let Modal::Auction(auc) = &g.modal else { panic!("expected the auction") };
+        assert_eq!(auc.active, vec![0, 2]);
+    }
+
+    #[test]
+    fn a_three_way_auction_settles_on_the_survivor() {
+        let mut g = bidding(3);
+        g.handle_key(KeyCode::Char('b')); // 0 bids 10
+        g.handle_key(KeyCode::Char('b')); // 1 bids 20
+        g.handle_key(KeyCode::Char('p')); // 2 out
+        g.handle_key(KeyCode::Char('b')); // 0 bids 30
+        g.handle_key(KeyCode::Char('p')); // 1 out, leaving 0 as high bidder
+        assert_eq!(g.board[BOARDWALK].owner(), Some(0));
+        assert_eq!(g.players[0].money, 1470);
+    }
+
+    #[test]
+    fn cancelling_leaves_the_lot_unsold() {
+        let mut g = bidding(2);
+        g.handle_key(KeyCode::Char('b'));
+        g.handle_key(KeyCode::Esc);
+        assert!(matches!(g.modal, Modal::None));
+        assert_eq!(g.board[BOARDWALK].owner(), None);
+        assert_eq!(g.players[0].money, 1500, "an unsold lot costs nothing");
+    }
+}

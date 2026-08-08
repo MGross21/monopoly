@@ -89,3 +89,49 @@ impl ActionMenu {
         frame.render_widget(Paragraph::new(lines), inner);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_action_has_a_unique_hotkey() {
+        let mut keys: Vec<char> = ACTIONS.iter().map(|(_, _, key)| *key).collect();
+        keys.sort_unstable();
+        let count = keys.len();
+        keys.dedup();
+        assert_eq!(keys.len(), count);
+    }
+
+    #[test]
+    fn every_hotkey_resolves_to_its_own_row() {
+        for (i, (_, _, key)) in ACTIONS.iter().enumerate() {
+            let action = action_for_hotkey(*key).expect("a bound hotkey");
+            assert_eq!(action as usize, ACTIONS[i].0 as usize);
+        }
+    }
+
+    #[test]
+    fn an_unbound_key_resolves_to_nothing() {
+        assert!(action_for_hotkey('z').is_none());
+    }
+
+    #[test]
+    fn the_menu_cursor_is_bounded_at_both_ends() {
+        let mut menu = ActionMenu::new();
+        menu.prev();
+        assert_eq!(menu.cursor.selected, 0);
+
+        for _ in 0..ACTIONS.len() * 2 {
+            menu.next();
+        }
+        assert_eq!(menu.cursor.selected, ACTIONS.len() - 1);
+    }
+
+    #[test]
+    fn the_cursor_selects_the_matching_row() {
+        let mut menu = ActionMenu::new();
+        menu.next();
+        assert_eq!(menu.selected() as usize, ACTIONS[1].0 as usize);
+    }
+}

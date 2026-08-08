@@ -154,3 +154,119 @@ pub fn choice_popup<S: AsRef<str>>(frame: &mut Frame, title: &str, options: &[S]
     frame.render_widget(block, area);
     frame.render_widget(Paragraph::new(selectable_lines(options, selected)), inner);
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::style::Modifier;
+
+    // --- Cursor -------------------------------------------------------------
+
+    #[test]
+    fn the_cursor_starts_at_the_top_and_stops_there() {
+        let mut cursor = Cursor::new(3);
+        assert_eq!(cursor.selected, 0);
+        cursor.up();
+        assert_eq!(cursor.selected, 0);
+    }
+
+    #[test]
+    fn the_cursor_stops_at_the_last_row() {
+        let mut cursor = Cursor::new(3);
+        for _ in 0..10 {
+            cursor.down();
+        }
+        assert_eq!(cursor.selected, 2);
+    }
+
+    #[test]
+    fn an_empty_list_leaves_the_cursor_at_zero() {
+        let mut cursor = Cursor::new(0);
+        cursor.down();
+        assert_eq!(cursor.selected, 0);
+    }
+
+    #[test]
+    fn shrinking_a_list_pulls_the_cursor_back_into_range() {
+        let mut cursor = Cursor::new(5);
+        for _ in 0..4 {
+            cursor.down();
+        }
+        assert_eq!(cursor.selected, 4);
+        cursor.set_len(2);
+        assert_eq!(cursor.selected, 1);
+    }
+
+    // --- Confirm ------------------------------------------------------------
+
+    #[test]
+    fn a_prompt_defaults_to_no() {
+        let confirm = Confirm::new();
+        assert!(!confirm.is_yes());
+        assert!(matches!(Confirm::new().handle_key(KeyCode::Enter), ConfirmResult::No));
+    }
+
+    #[test]
+    fn any_arrow_toggles_the_answer() {
+        for key in [KeyCode::Up, KeyCode::Down, KeyCode::Left, KeyCode::Right] {
+            let mut confirm = Confirm::new();
+            assert!(matches!(confirm.handle_key(key), ConfirmResult::Pending));
+            assert!(confirm.is_yes());
+        }
+    }
+
+    #[test]
+    fn enter_resolves_the_highlighted_answer() {
+        let mut confirm = Confirm::new();
+        confirm.toggle();
+        assert!(matches!(confirm.handle_key(KeyCode::Enter), ConfirmResult::Yes));
+    }
+
+    #[test]
+    fn escape_always_means_no() {
+        let mut confirm = Confirm::new();
+        confirm.toggle();
+        assert!(matches!(confirm.handle_key(KeyCode::Esc), ConfirmResult::No));
+    }
+
+    #[test]
+    fn an_unrelated_key_leaves_the_prompt_pending() {
+        let mut confirm = Confirm::new();
+        assert!(matches!(confirm.handle_key(KeyCode::Char('x')), ConfirmResult::Pending));
+        assert!(!confirm.is_yes(), "and does not move the highlight");
+    }
+
+    // --- layout and lists ---------------------------------------------------
+
+    #[test]
+    fn a_centered_rect_sits_in_the_middle() {
+        let area = Rect::new(0, 0, 100, 50);
+        let inner = centered_rect(area, 20, 10);
+        assert_eq!((inner.width, inner.height), (20, 10));
+        assert_eq!(inner.x, 40);
+        assert_eq!(inner.y, 20);
+    }
+
+    #[test]
+    fn a_centered_rect_never_exceeds_its_area() {
+        let area = Rect::new(0, 0, 10, 4);
+        let inner = centered_rect(area, 40, 20);
+        assert!(inner.width <= area.width);
+        assert!(inner.height <= area.height);
+    }
+
+    #[test]
+    fn only_the_selected_line_is_highlighted() {
+        let lines = selectable_lines(&["one", "two", "three"], 1);
+        assert_eq!(lines.len(), 3);
+        assert!(lines[1].style.add_modifier.contains(Modifier::REVERSED));
+        assert!(!lines[0].style.add_modifier.contains(Modifier::REVERSED));
+        assert!(!lines[2].style.add_modifier.contains(Modifier::REVERSED));
+    }
+
+    #[test]
+    fn a_selection_past_the_end_highlights_nothing() {
+        let lines = selectable_lines(&["one", "two"], 9);
+        assert!(lines.iter().all(|l| !l.style.add_modifier.contains(Modifier::REVERSED)));
+    }
+}

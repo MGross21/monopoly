@@ -11,7 +11,7 @@ use crate::ui::{Cursor, choice_popup, info_popup};
 const STEP: u32 = 10;
 
 /// Which step of building a trade we're on.
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 enum Stage {
     Partner,  // choosing who to trade with
     Property, // choosing which property changes hands
@@ -159,5 +159,130 @@ impl Game {
                 info_popup(frame, " Trade — price ", &lines);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::game::testkit::*;
+
+    /// Walk the builder to the price stage for the only tradeable property.
+    fn to_price_stage(g: &mut Game) {
+        g.open_trade();
+        g.handle_key(KeyCode::Enter); // pick the partner
+        g.handle_key(KeyCode::Enter); // pick the property
+    }
+
+    #[test]
+    fn trading_needs_a_partner() {
+        let mut g = game(2, 1500);
+        g.players[1].bankrupt = true;
+        g.open_trade();
+        assert!(matches!(g.modal, Modal::None));
+    }
+
+    #[test]
+    fn trading_needs_something_to_trade() {
+        let mut g = game(2, 1500);
+        g.open_trade();
+        g.handle_key(KeyCode::Enter);
+        assert!(matches!(g.modal, Modal::None), "neither side owns anything");
+    }
+
+    #[test]
+    fn the_price_defaults_to_the_printed_value() {
+        let mut g = game(2, 1500);
+        own(&mut g, BOARDWALK, 1);
+        to_price_stage(&mut g);
+        let Modal::Trade(t) = &g.modal else { panic!("expected the trade builder") };
+        assert_eq!(t.price, 400);
+    }
+
+    #[test]
+    fn the_price_adjusts_in_steps_and_never_goes_negative() {
+        let mut g = game(2, 1500);
+        own(&mut g, MEDITERRANEAN, 1);
+        to_price_stage(&mut g);
+        g.handle_key(KeyCode::Right);
+        let Modal::Trade(t) = &g.modal else { panic!("expected the trade builder") };
+        assert_eq!(t.price, 60 + STEP);
+
+        for _ in 0..20 {
+            g.handle_key(KeyCode::Left);
+        }
+        let Modal::Trade(t) = &g.modal else { panic!("expected the trade builder") };
+        assert_eq!(t.price, 0);
+    }
+
+    #[test]
+    fn buying_from_a_partner_moves_the_deed_and_the_cash() {
+        let mut g = game(2, 1500);
+        own(&mut g, BOARDWALK, 1);
+        to_price_stage(&mut g);
+        g.handle_key(KeyCode::Enter);
+        assert!(matches!(g.modal, Modal::None));
+        assert_eq!(g.board[BOARDWALK].owner(), Some(0));
+        assert_eq!(g.players[0].money, 1100);
+        assert_eq!(g.players[1].money, 1900);
+    }
+
+    #[test]
+    fn selling_to_a_partner_moves_the_cash_the_other_way() {
+        let mut g = game(2, 1500);
+        own(&mut g, BOARDWALK, 0);
+        to_price_stage(&mut g);
+        g.handle_key(KeyCode::Enter);
+        assert_eq!(g.board[BOARDWALK].owner(), Some(1));
+        assert_eq!(g.players[0].money, 1900);
+        assert_eq!(g.players[1].money, 1100);
+    }
+
+    #[test]
+    fn a_buyer_who_cannot_pay_keeps_the_builder_open() {
+        let mut g = game(2, 1500);
+        g.players[0].money = 10;
+        own(&mut g, BOARDWALK, 1);
+        to_price_stage(&mut g);
+        g.handle_key(KeyCode::Enter);
+        assert!(matches!(g.modal, Modal::Trade(_)), "so the price can be lowered");
+        assert_eq!(g.board[BOARDWALK].owner(), Some(1));
+    }
+
+    #[test]
+    fn a_built_up_street_cannot_change_hands() {
+        let mut g = game(2, 1500);
+        own(&mut g, BOARDWALK, 1);
+        set_houses(&mut g, BOARDWALK, 1);
+        to_price_stage(&mut g);
+        g.handle_key(KeyCode::Enter);
+        assert!(matches!(g.modal, Modal::Trade(_)));
+        assert_eq!(g.board[BOARDWALK].owner(), Some(1), "sell the houses first");
+    }
+
+    #[test]
+    fn escape_steps_back_through_the_stages() {
+        let mut g = game(2, 1500);
+        own(&mut g, BOARDWALK, 1);
+        to_price_stage(&mut g);
+        g.handle_key(KeyCode::Esc);
+        let Modal::Trade(t) = &g.modal else { panic!("expected the trade builder") };
+        assert_eq!(t.stage, Stage::Property);
+
+        g.handle_key(KeyCode::Esc);
+        let Modal::Trade(t) = &g.modal else { panic!("expected the trade builder") };
+        assert_eq!(t.stage, Stage::Partner);
+
+        g.handle_key(KeyCode::Esc);
+        assert!(matches!(g.modal, Modal::None));
+    }
+
+    #[test]
+    fn both_sides_holdings_are_on_the_table() {
+        let mut g = game(2, 1500);
+        own(&mut g, MEDITERRANEAN, 0);
+        own(&mut g, BOARDWALK, 1);
+        own(&mut g, ORIENTAL, 1);
+        assert_eq!(g.tradeable(0, 1), vec![MEDITERRANEAN, ORIENTAL, BOARDWALK]);
     }
 }

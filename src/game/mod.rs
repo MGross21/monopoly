@@ -18,8 +18,13 @@ use ratatui_notifications::{
 mod action;
 mod auction;
 mod cards;
+mod debt;
 mod estate;
 mod jail;
+#[cfg(test)]
+mod testkit;
+#[cfg(test)]
+mod tests;
 mod trade;
 
 use std::collections::VecDeque;
@@ -28,6 +33,7 @@ use serde::{Deserialize, Serialize};
 
 use auction::Auction;
 use cards::{Card, CardDraw, Deck, fresh_decks};
+use debt::{Debt, Payee};
 use estate::EstateMenu;
 use jail::JailMenu;
 use trade::Trade;
@@ -96,6 +102,7 @@ enum Modal {
     Buy { confirm: Confirm, pos: usize },
     Auction(Auction),
     Trade(Trade),
+    Debt(Debt),
     GameOver(usize), // winning player index
 }
 
@@ -301,6 +308,16 @@ impl Game {
                 }
             }
 
+            // Forced liquidation; has no cancel key, so it stays until the debt
+            // is paid off or the player folds.
+            Modal::Debt(_) => {
+                if let Modal::Debt(mut d) = std::mem::replace(&mut self.modal, Modal::None)
+                    && self.debt_input(&mut d, key)
+                {
+                    self.modal = Modal::Debt(d);
+                }
+            }
+
             // Buy-or-auction prompt for the property just landed on.
             Modal::Buy { confirm, pos } => {
                 let pos = *pos;
@@ -433,55 +450,66 @@ impl Game {
             return;
         }
 
-        self.advance(who, total);
-        if self.settle_if_bankrupt(who) {
-            return;
-        }
-
-        // Landing on "Go To Jail" ends the turn now — no bonus roll even if the
-        // move that put them there was doubles.
-        if self.players[who].in_jail {
-            self.can_roll = false;
-            return;
-        }
-
-        // Doubles earn another roll; the third in a row sends you to Jail.
+        // Doubles earn another roll; the third in a row goes straight to Jail
+        // without moving. Settled before the move so a debt raised on the
+        // landing can't disturb the turn state while its popup is open.
         if a == b {
             self.doubles += 1;
             if self.doubles >= 3 {
                 self.send_to_jail();
                 self.can_roll = false;
-            } else {
-                self.can_roll = true;
-                self.notify(format!("Doubles! Player {} rolls again", who + 1), Level::Info);
+                return;
             }
+            self.can_roll = true;
+            self.notify(format!("Doubles! Player {} rolls again", who + 1), Level::Info);
         } else {
             self.can_roll = false;
+        }
+
+        self.advance(who, total);
+
+        // Landing on "Go To Jail" ends the turn — no bonus roll.
+        if self.players[who].in_jail {
+            self.can_roll = false;
+        }
+        self.settle_if_bankrupt(who);
+    }
+
+    /// What landing on a space demands, read off the board before `self` is
+    /// borrowed mutably to act on it.
+    fn landing(&self, pos: usize) -> Landing {
+        let space = &self.board[pos];
+        match space {
+            Space::Tax(amount) => Landing::Tax(*amount),
+            Space::GoToJail => Landing::Jail,
+            Space::Chance => Landing::Draw(Deck::Chance),
+            Space::CommunityChest => Landing::Draw(Deck::Chest),
+            _ if !space.is_ownable() => Landing::Nothing,
+            _ => match space.owner() {
+                None => Landing::ForSale(space.price().unwrap_or(0)),
+                Some(owner) if owner != self.current => Landing::Owned(owner),
+                Some(_) => Landing::Nothing,
+            },
         }
     }
 
     /// React to the space the current player landed on.
     fn resolve_landing(&mut self, pos: usize, total: usize) {
-        // Clone the space so we can borrow `self` mutably below.
-        match self.board[pos].clone() {
-            Space::Tax(amount) => self.pay_bank(amount),
-            Space::GoToJail => self.send_to_jail(),
-            Space::Chance => self.draw_card(Deck::Chance),
-            Space::CommunityChest => self.draw_card(Deck::Chest),
-            space if space.is_ownable() => match space.owner() {
-                None => {
-                    // Offer to buy; declining sends the property to auction.
-                    let price = space.price().unwrap_or(0);
-                    self.notify(format!("{} is for sale (${price})", space.name()), Level::Info);
-                    self.modal = Modal::Buy { confirm: Confirm::new(), pos };
-                }
-                Some(owner) if owner != self.current => {
-                    let rent = self.rent(pos, owner, total);
-                    self.pay_player(owner, rent);
-                }
-                Some(_) => {} // your own property
-            },
-            _ => {}
+        match self.landing(pos) {
+            Landing::Tax(amount) => self.pay_bank(amount),
+            Landing::Jail => self.send_to_jail(),
+            Landing::Draw(deck) => self.draw_card(deck),
+            // Offer to buy; declining sends the property to auction.
+            Landing::ForSale(price) => {
+                let name = self.board[pos].name().to_string();
+                self.notify(format!("{name} is for sale (${price})"), Level::Info);
+                self.modal = Modal::Buy { confirm: Confirm::new(), pos };
+            }
+            Landing::Owned(owner) => {
+                let rent = self.rent(pos, owner, total);
+                self.pay_player(owner, rent);
+            }
+            Landing::Nothing => {}
         }
     }
 
@@ -560,39 +588,16 @@ impl Game {
     // --- money & helpers -----------------------------------------------------
 
     fn pay_bank(&mut self, amount: u32) {
-        let who = self.current;
-        if self.players[who].money >= amount {
-            self.players[who].money -= amount;
-            self.notify(format!("Player {} paid ${amount} in tax", who + 1), Level::Warn);
-        } else {
-            let paid = self.players[who].money;
-            self.players[who].money = 0;
-            self.notify(
-                format!("Player {} owed ${amount} but had ${paid} — bankrupt", who + 1),
-                Level::Error,
-            );
-            self.bankrupt(who, None);
-        }
+        self.charge(self.current, amount, Payee::Bank);
     }
 
-    /// Pay rent from the current player to `owner`. If the player can't cover it,
-    /// they hand over everything they have and go bankrupt to `owner`.
     fn pay_player(&mut self, owner: usize, rent: u32) {
-        let who = self.current;
-        if self.players[who].money >= rent {
-            self.players[who].money -= rent;
-            self.players[owner].money += rent;
-            self.notify(format!("Player {} paid ${rent} rent to Player {}", who + 1, owner + 1), Level::Warn);
-        } else {
-            let paid = self.players[who].money;
-            self.players[who].money = 0;
-            self.players[owner].money += paid;
-            self.notify(
-                format!("Player {} paid ${paid} of ${rent} rent then went bankrupt to Player {}", who + 1, owner + 1),
-                Level::Error,
-            );
-            self.bankrupt(who, Some(owner));
-        }
+        self.charge(self.current, rent, Payee::Player(owner));
+    }
+
+    /// Board indices owned by `who`, in board order.
+    fn holdings(&self, who: usize) -> Vec<usize> {
+        (0..self.board.len()).filter(|&i| self.board[i].owner() == Some(who)).collect()
     }
 
     /// Eliminate `who`: hand their estate to `creditor` (a player) or back to the
@@ -647,8 +652,8 @@ impl Game {
         }
     }
 
-    /// Does `owner` hold every street in `group`? (Required to build or to earn
-    /// doubled rent.)
+    /// True when `owner` holds every street in `group`, the precondition for
+    /// building and for doubled rent.
     fn owns_full_group(&self, owner: usize, group: ColorGroup) -> bool {
         let mut total = 0;
         let mut mine = 0;
@@ -722,6 +727,7 @@ impl Game {
             }
             Modal::Auction(auc) => self.render_auction(frame, auc),
             Modal::Trade(t) => self.render_trade(frame, t),
+            Modal::Debt(d) => self.render_debt(frame, d),
             Modal::GameOver(winner) => crate::ui::info_popup(
                 frame,
                 &format!(" Player {} wins! ", winner + 1),
@@ -734,7 +740,19 @@ impl Game {
     }
 }
 
+#[derive(Clone, Copy)]
 enum Kind {
     Railroad,
     Utility,
+}
+
+/// The consequence of landing on a space, free of any borrow on the board.
+#[derive(Clone, Copy)]
+enum Landing {
+    Tax(u32),
+    Jail,
+    Draw(Deck),
+    ForSale(u32),
+    Owned(usize),
+    Nothing,
 }

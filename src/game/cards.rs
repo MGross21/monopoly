@@ -8,7 +8,7 @@ use std::collections::VecDeque;
 
 use ratatui_notifications::Level;
 
-use super::{BOARD_LEN, Game, HOTEL, InfoBox, Modal};
+use super::{BOARD_LEN, Game, HOTEL, InfoBox, Modal, Payee};
 use crate::ui::dice::Clip;
 
 /// What drawing a card does to the current player.
@@ -172,25 +172,10 @@ impl Game {
                 self.notify(format!("Player {} collected ${n} from each player", who + 1), Level::Info);
             }
             CardEffect::PayEach(n) => {
-                let others: Vec<usize> = self.active_players().into_iter().filter(|&i| i != who).collect();
+                let others: Vec<usize> =
+                    self.active_players().into_iter().filter(|&i| i != who).collect();
                 let owed = n * others.len() as u32;
-                if self.players[who].money >= owed {
-                    self.players[who].money -= owed;
-                    for i in others {
-                        self.players[i].money += n;
-                    }
-                    self.notify(format!("Player {} paid ${n} to each player", who + 1), Level::Warn);
-                } else {
-                    // Hand out what's left, then go bankrupt to the bank.
-                    let mut left = self.players[who].money;
-                    for i in others {
-                        let paid = left.min(n);
-                        self.players[i].money += paid;
-                        left -= paid;
-                    }
-                    self.players[who].money = left;
-                    self.bankrupt(who, None);
-                }
+                self.charge(who, owed, Payee::Split(others));
             }
             CardEffect::AdvanceTo(dest) => {
                 let pos = self.players[who].position;
@@ -225,5 +210,250 @@ impl Game {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::game::testkit::*;
+    use crate::space::ColorGroup;
+
+    // --- the decks ----------------------------------------------------------
+
+    #[test]
+    fn both_decks_are_dealt_and_shuffled_whole() {
+        let (chance, chest) = fresh_decks();
+        assert_eq!(chance.len(), chance_deck().len());
+        assert_eq!(chest.len(), chest_deck().len());
+    }
+
+    #[test]
+    fn each_deck_holds_exactly_one_get_out_of_jail_free() {
+        for deck in [chance_deck(), chest_deck()] {
+            let count = deck
+                .iter()
+                .filter(|c| matches!(c.effect, CardEffect::GetOutFree))
+                .count();
+            assert_eq!(count, 1);
+        }
+    }
+
+    #[test]
+    fn every_advance_target_is_on_the_board() {
+        for deck in [chance_deck(), chest_deck()] {
+            for card in deck {
+                if let CardEffect::AdvanceTo(dest) = card.effect {
+                    assert!(dest < BOARD_LEN, "{} points off the board", card.text);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn drawing_recycles_the_card_to_the_bottom() {
+        let mut g = game(2, 1500);
+        let top = g.chance.front().expect("a full deck").text;
+        let size = g.chance.len();
+        g.draw_card(Deck::Chance);
+        assert_eq!(g.chance.len(), size, "the deck never shrinks");
+        assert_eq!(g.chance.back().expect("a full deck").text, top);
+        assert!(matches!(g.modal, Modal::Card(_)));
+    }
+
+    #[test]
+    fn drawing_cycles_through_the_whole_deck_before_repeating() {
+        let mut g = game(2, 1500);
+        let size = g.chest.len();
+        let first = g.chest.front().expect("a full deck").text;
+        for _ in 0..size {
+            g.draw_card(Deck::Chest);
+        }
+        assert_eq!(g.chest.front().expect("a full deck").text, first);
+    }
+
+    // --- effects ------------------------------------------------------------
+
+    #[test]
+    fn collect_credits_the_bank() {
+        let mut g = game(2, 1500);
+        g.apply_card(CardEffect::Collect(150));
+        assert_eq!(g.players[0].money, 1650);
+    }
+
+    #[test]
+    fn pay_debits_the_bank() {
+        let mut g = game(2, 1500);
+        g.apply_card(CardEffect::Pay(15));
+        assert_eq!(g.players[0].money, 1485);
+    }
+
+    #[test]
+    fn collect_each_takes_from_every_rival() {
+        let mut g = game(3, 1500);
+        g.apply_card(CardEffect::CollectEach(50));
+        assert_eq!(g.players[0].money, 1600);
+        assert_eq!(g.players[1].money, 1450);
+        assert_eq!(g.players[2].money, 1450);
+    }
+
+    #[test]
+    fn collect_each_skips_eliminated_players() {
+        let mut g = game(3, 1500);
+        g.players[2].bankrupt = true;
+        g.apply_card(CardEffect::CollectEach(50));
+        assert_eq!(g.players[0].money, 1550);
+        assert_eq!(g.players[2].money, 1500);
+    }
+
+    #[test]
+    fn pay_each_pays_every_rival() {
+        let mut g = game(3, 1500);
+        g.apply_card(CardEffect::PayEach(50));
+        assert_eq!(g.players[0].money, 1400);
+        assert_eq!(g.players[1].money, 1550);
+        assert_eq!(g.players[2].money, 1550);
+    }
+
+    #[test]
+    fn pay_each_beyond_your_means_opens_liquidation() {
+        let mut g = game(3, 1500);
+        g.players[0].money = 10;
+        own(&mut g, MEDITERRANEAN, 0);
+        own(&mut g, BALTIC, 0);
+        g.apply_card(CardEffect::PayEach(25));
+        assert!(matches!(g.modal, Modal::Debt(_)));
+        assert!(!g.players[0].bankrupt);
+    }
+
+    #[test]
+    fn advancing_forward_collects_go_on_the_way_round() {
+        let mut g = game(2, 1500);
+        place(&mut g, 0, GO_TO_JAIL);
+        g.apply_card(CardEffect::AdvanceTo(0));
+        assert_eq!(g.players[0].position, 0);
+        assert_eq!(g.players[0].money, 1700);
+    }
+
+    #[test]
+    fn advancing_without_wrapping_pays_nothing() {
+        let mut g = game(2, 1500);
+        place(&mut g, 0, CHANCE_LOW);
+        g.apply_card(CardEffect::AdvanceTo(ILLINOIS));
+        assert_eq!(g.players[0].position, ILLINOIS);
+        assert_eq!(g.players[0].money, 1500);
+    }
+
+    #[test]
+    fn advancing_onto_a_rival_property_charges_rent() {
+        let mut g = game(2, 1500);
+        own(&mut g, ILLINOIS, 1);
+        place(&mut g, 0, CHANCE_LOW);
+        g.apply_card(CardEffect::AdvanceTo(ILLINOIS));
+        assert_eq!(g.players[0].money, 1480);
+        assert_eq!(g.players[1].money, 1520);
+    }
+
+    #[test]
+    fn going_back_never_collects_go() {
+        let mut g = game(2, 1500);
+        place(&mut g, 0, 1);
+        g.apply_card(CardEffect::Back(3));
+        assert_eq!(g.players[0].position, LUXURY_TAX);
+        assert_eq!(g.players[0].money, 1400, "the tax it landed on, and no GO salary");
+    }
+
+    #[test]
+    fn going_back_resolves_the_new_square() {
+        let mut g = game(2, 1500);
+        place(&mut g, 0, CHANCE_LOW);
+        g.apply_card(CardEffect::Back(3));
+        assert_eq!(g.players[0].position, INCOME_TAX);
+        assert_eq!(g.players[0].money, 1300, "and pays the tax it lands on");
+    }
+
+    #[test]
+    fn the_jail_card_sends_you_straight_there() {
+        let mut g = game(2, 1500);
+        place(&mut g, 0, ILLINOIS);
+        g.apply_card(CardEffect::GoToJail);
+        assert!(g.players[0].in_jail);
+        assert_eq!(g.players[0].position, JAIL);
+        assert_eq!(g.players[0].money, 1500);
+    }
+
+    #[test]
+    fn get_out_free_cards_accumulate() {
+        let mut g = game(2, 1500);
+        g.apply_card(CardEffect::GetOutFree);
+        g.apply_card(CardEffect::GetOutFree);
+        assert_eq!(g.players[0].get_out_free, 2);
+    }
+
+    #[test]
+    fn repairs_bill_per_house_and_per_hotel() {
+        let mut g = game(2, 1500);
+        own_group(&mut g, ColorGroup::Brown, 0);
+        set_houses(&mut g, MEDITERRANEAN, 3);
+        set_houses(&mut g, BALTIC, HOTEL);
+        g.apply_card(CardEffect::Repairs { per_house: 25, per_hotel: 100 });
+        assert_eq!(g.players[0].money, 1325, "3 houses at 25, one hotel at 100");
+    }
+
+    #[test]
+    fn repairs_cost_nothing_when_you_have_built_nothing() {
+        let mut g = game(2, 1500);
+        own_group(&mut g, ColorGroup::Brown, 0);
+        g.apply_card(CardEffect::Repairs { per_house: 25, per_hotel: 100 });
+        assert_eq!(g.players[0].money, 1500);
+    }
+
+    // --- presentation -------------------------------------------------------
+
+    #[test]
+    fn a_resolved_card_shows_its_text() {
+        let mut g = game(2, 1500);
+        let card = Card {
+            title: CHANCE_TITLE,
+            text: "Bank pays you a dividend of $50",
+            effect: CardEffect::Collect(50),
+        };
+        g.finish_card(card);
+        match &g.modal {
+            Modal::Info(info) => {
+                assert_eq!(info.lines, vec!["Bank pays you a dividend of $50".to_string()]);
+                assert_eq!(info.title, CHANCE_TITLE);
+            }
+            _ => panic!("expected the card text"),
+        }
+    }
+
+    #[test]
+    fn a_card_that_chains_into_a_popup_skips_its_text() {
+        let mut g = game(2, 1500);
+        place(&mut g, 0, CHANCE_LOW);
+        let card = Card {
+            title: CHANCE_TITLE,
+            text: "Advance to Illinois Ave",
+            effect: CardEffect::AdvanceTo(ILLINOIS),
+        };
+        g.finish_card(card);
+        assert!(matches!(g.modal, Modal::Buy { .. }), "the buy prompt wins");
+    }
+
+    #[test]
+    fn a_card_that_jails_you_ends_the_turn() {
+        let mut g = game(2, 1500);
+        let card = Card { title: CHANCE_TITLE, text: "Go directly to Jail", effect: CardEffect::GoToJail };
+        g.finish_card(card);
+        assert!(!g.can_roll);
+    }
+
+    #[test]
+    fn landing_on_chance_draws_a_card() {
+        let mut g = game(2, 1500);
+        place(&mut g, 0, CHANCE_LOW - 2);
+        g.apply_roll(1, 1);
+        assert!(matches!(g.modal, Modal::Card(_)));
     }
 }
